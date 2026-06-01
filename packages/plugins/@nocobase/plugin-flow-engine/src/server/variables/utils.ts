@@ -13,6 +13,7 @@ import type { JSONValue } from '../template/resolver';
 import { variables, inferSelectsFromUsage } from './registry';
 import { adjustSelectsForCollection } from './selects';
 import { fetchRecordOrRecordsJson, getExtraKeyFieldsForSelect, mergeFieldsWithExtras } from './records';
+import { applyRecordReadPolicy, sanitizeRecordReadResult } from './permissions';
 
 /**
  * 预取：构建“同记录”的字段/关联并集，一次查询写入 ctx.state.__varResolveBatchCache，供后续解析复用
@@ -161,16 +162,31 @@ export async function prefetchRecordsForResolve(
         const fld = mergeFieldsWithExtras(fldBase, effectiveExtras);
 
         const app = appends.size ? Array.from(appends).sort() : undefined;
-        const json = await fetchRecordOrRecordsJson(repo, {
-          filterByTk,
-          fields: fld,
-          appends: app,
-          filterTargetKey,
-          pkAttr,
-          pkIsValid,
-        });
+        const readPolicy = await applyRecordReadPolicy(koaCtx, dataSourceKey, collection, fld, app, false);
+        if (!readPolicy.allowed) continue;
+        if (readPolicy.associationFilters) continue;
+
+        const json = sanitizeRecordReadResult(
+          await fetchRecordOrRecordsJson(repo, {
+            filterByTk,
+            fields: readPolicy.fields,
+            appends: readPolicy.appends,
+            filter: readPolicy.filter,
+            filterTargetKey,
+            pkAttr,
+            pkIsValid,
+          }),
+          readPolicy.projection,
+        );
         if (cache) {
-          const key = JSON.stringify({ ds: dataSourceKey, c: collection, tk: filterByTk, f: fld, a: app });
+          const key = JSON.stringify({
+            ds: dataSourceKey,
+            c: collection,
+            tk: filterByTk,
+            f: readPolicy.fields,
+            a: readPolicy.appends,
+            filter: readPolicy.filter,
+          });
           cache.set(key, json);
         }
       } catch (e: any) {

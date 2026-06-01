@@ -14,7 +14,13 @@ import type { TargetKey } from '@nocobase/database';
 import { ResourcerContext } from '@nocobase/resourcer';
 import { extractUsedVariablePaths } from '@nocobase/utils';
 import { adjustSelectsForCollection } from './selects';
-import { fetchRecordOrRecordsJson, getExtraKeyFieldsForSelect, mergeFieldsWithExtras } from './records';
+import {
+  AssociationReadInstruction,
+  fetchRecordOrRecordsJson,
+  getExtraKeyFieldsForSelect,
+  mergeFieldsWithExtras,
+} from './records';
+import { applyRecordReadPolicy, sanitizeRecordReadResult } from './permissions';
 
 export type JSONValue = string | { [key: string]: JSONValue } | JSONValue[];
 
@@ -173,6 +179,143 @@ export function inferSelectsFromUsage(
   return { generatedAppends, generatedFields };
 }
 
+function isValidAssociationSourceId(sourceId: unknown) {
+  if (typeof sourceId === 'number') return Number.isFinite(sourceId);
+  if (typeof sourceId === 'string') return sourceId.length > 0;
+  return false;
+}
+
+function getAssociationFieldSelections(items: string[] | undefined, associationName: string, filteredPaths: string[]) {
+  if (!Array.isArray(items)) return undefined;
+  const prefix = `${associationName}.`;
+  const filteredPrefixes = filteredPaths
+    .filter((path) => path.startsWith(prefix))
+    .map((path) => path.slice(prefix.length))
+    .filter(Boolean);
+  const selections = items
+    .filter((item) => item.startsWith(prefix))
+    .map((item) => item.slice(prefix.length))
+    .filter((item) => item && !filteredPrefixes.some((path) => item === path || item.startsWith(`${path}.`)));
+  return selections.length ? [...new Set(selections)] : undefined;
+}
+
+function getCollectionSourceKey(collection: {
+  filterTargetKey?: string | string[];
+  model?: { primaryKeyAttribute?: string; rawAttributes?: Record<string, unknown> };
+}) {
+  const pkAttr = collection?.model?.primaryKeyAttribute;
+  if (pkAttr && collection?.model?.rawAttributes?.[pkAttr]) return pkAttr;
+  return typeof collection?.filterTargetKey === 'string' ? collection.filterTargetKey : undefined;
+}
+
+function getAssociationSourceKey(
+  collection: {
+    filterTargetKey?: string | string[];
+    model?: {
+      primaryKeyAttribute?: string;
+      rawAttributes?: Record<string, unknown>;
+      associations?: Record<string, { sourceKey?: string }>;
+    };
+    getField?: (fieldName: string) => { sourceKey?: string } | undefined;
+  },
+  associationName: string,
+) {
+  return (
+    collection?.getField?.(associationName)?.sourceKey ||
+    collection?.model?.associations?.[associationName]?.sourceKey ||
+    getCollectionSourceKey(collection)
+  );
+}
+
+function getAssociationTargetCollectionName(
+  cm: SequelizeCollectionManager,
+  collectionName: string,
+  associationName: string,
+) {
+  const collection = cm.db.getCollection?.(collectionName);
+  const field = collection?.getField?.(associationName) as { target?: string } | undefined;
+  if (field?.target) return field.target;
+  const association = collection?.model?.associations?.[associationName] as { target?: { name?: string } } | undefined;
+  const targetModelName = association?.target?.name;
+  if (!targetModelName) return undefined;
+  return cm.db.getCollectionByModelName?.(targetModelName)?.name || targetModelName;
+}
+
+function buildAssociationReadLoaders(
+  cm: SequelizeCollectionManager,
+  rootCollectionName: string,
+  associationFilters?: Record<string, unknown>,
+  fields?: string[],
+  appends?: string[],
+) {
+  if (!associationFilters) return [];
+  const filteredPaths = Object.keys(associationFilters);
+  const loaders: AssociationReadInstruction[] = [];
+
+  const ensureLoader = (
+    collectionName: string,
+    pathParts: string[],
+    parentLoaders: AssociationReadInstruction[],
+    pathPrefix = '',
+  ) => {
+    const [associationName, ...rest] = pathParts;
+    if (!associationName) return undefined;
+    const associationPath = pathPrefix ? `${pathPrefix}.${associationName}` : associationName;
+
+    const sourceCollection = cm.db.getCollection?.(collectionName);
+    const targetCollectionName = getAssociationTargetCollectionName(cm, collectionName, associationName);
+    if (!sourceCollection || !targetCollectionName) return undefined;
+
+    let loader = parentLoaders.find((item) => item.associationName === associationName);
+    if (!loader) {
+      const associationPath = filteredPaths
+        .flatMap((filterPath) => {
+          const parts = filterPath.split('.');
+          return parts.map((_, index) => parts.slice(0, index + 1).join('.'));
+        })
+        .find((path) => path.split('.').at(-1) === associationName);
+      loader = {
+        associationName,
+        repositoryName: `${collectionName}.${associationName}`,
+        sourceKey: getAssociationSourceKey(sourceCollection, associationName),
+        fields: getAssociationFieldSelections(fields, associationPath, filteredPaths),
+        appends: getAssociationFieldSelections(appends, associationPath, filteredPaths),
+        children: [],
+      };
+      parentLoaders.push(loader);
+    }
+
+    if (!rest.length) {
+      loader.filter = associationFilters[associationPath];
+      return loader;
+    }
+
+    return ensureLoader(targetCollectionName, rest, loader.children || [], associationPath);
+  };
+
+  for (const [associationPath, filter] of Object.entries(associationFilters)) {
+    const parts = associationPath.split('.').filter(Boolean);
+    const loader = ensureLoader(rootCollectionName, parts, loaders);
+    if (loader) loader.filter = filter;
+  }
+
+  const addChildSourceKeys = (loader: AssociationReadInstruction) => {
+    for (const child of loader.children || []) {
+      if (child.sourceKey) {
+        loader.fields = [...new Set([...(loader.fields || []), child.sourceKey])];
+      }
+      addChildSourceKeys(child);
+    }
+    if (!loader.children?.length) delete loader.children;
+  };
+
+  for (const loader of loaders) {
+    addChildSourceKeys(loader);
+  }
+
+  return loaders;
+}
+
 /**
  * 在一次 variables.resolve 调用（或批处理）范围内缓存记录查询结果，减少重复 DB 读。
  * 缓存挂载在 koaCtx.state.__varResolveBatchCache。
@@ -188,6 +331,7 @@ async function fetchRecordWithRequestCache(
   preferFullRecord?: boolean,
   associationName?: string,
   sourceId?: unknown,
+  options: { skipAcl?: boolean } = {},
 ): Promise<unknown> {
   try {
     const log = koaCtx.app?.logger?.child({
@@ -205,10 +349,21 @@ async function fetchRecordWithRequestCache(
     const ds = koaCtx.app.dataSourceManager.get(dataSourceKey || 'main');
     const cm = ds.collectionManager as SequelizeCollectionManager;
     if (!cm?.db) return undefined;
-    const repo =
-      associationName && typeof sourceId !== 'undefined'
-        ? cm.db.getRepository(associationName, sourceId as TargetKey)
-        : cm.db.getRepository(collection);
+    if (associationName && !isValidAssociationSourceId(sourceId)) {
+      return undefined;
+    }
+
+    const repo = associationName
+      ? cm.db.getRepository(associationName, sourceId as TargetKey)
+      : cm.db.getRepository(collection);
+    const actualCollection =
+      (repo as { targetCollection?: { name?: string }; collection?: { name?: string } })?.targetCollection?.name ||
+      (repo as { collection?: { name?: string } })?.collection?.name ||
+      collection;
+    const requestedCollection = cm.db.getCollection?.(collection)?.name || collection;
+    if (associationName && requestedCollection !== actualCollection) {
+      return undefined;
+    }
 
     // 确保查询字段包含主键（仅当模型存在明确主键且该属性存在于 rawAttributes 中时）
     const modelInfo = (
@@ -236,39 +391,93 @@ async function fetchRecordWithRequestCache(
     const effectiveExtras =
       strictSelects && Array.isArray(extraKeys) && extraKeys.length ? extraKeys.filter((k) => k === pkAttr) : extraKeys;
     const fieldsWithExtras = mergeFieldsWithExtras(fields, effectiveExtras);
+    const readPolicy = await applyRecordReadPolicy(
+      koaCtx,
+      dataSourceKey,
+      actualCollection,
+      fieldsWithExtras,
+      appends,
+      preferFullRecord,
+      {
+        ...options,
+        rawResourceName: associationName,
+      },
+    );
+    if (!readPolicy.allowed) return undefined;
+
+    const allowedFields = readPolicy.fields;
+    const allowedAppends = readPolicy.appends;
+    const allowedFilter = readPolicy.filter;
+    const allowedPreferFullRecord = readPolicy.preferFullRecord;
+    const associationFilters = readPolicy.associationFilters;
+    const associationFilterPaths = Object.keys(associationFilters || {});
+    const hasAssociationFilters = associationFilterPaths.length > 0;
+    const isFilteredAssociationPath = (path: string) =>
+      associationFilterPaths.some((filteredPath) => path === filteredPath || path.startsWith(`${filteredPath}.`));
+    const fetchFields =
+      hasAssociationFilters && Array.isArray(allowedFields)
+        ? allowedFields.filter((field) => !isFilteredAssociationPath(field))
+        : allowedFields;
+    const fetchAppends =
+      hasAssociationFilters && Array.isArray(allowedAppends)
+        ? allowedAppends.filter((append) => !isFilteredAssociationPath(append))
+        : allowedAppends;
+    const associationLoaders = buildAssociationReadLoaders(
+      cm,
+      actualCollection,
+      associationFilters,
+      allowedFields,
+      allowedAppends,
+    );
+    const associationSourceKeys = associationLoaders
+      .map((loader) => loader.sourceKey)
+      .filter((sourceKey): sourceKey is string => typeof sourceKey === 'string' && sourceKey.length > 0);
+    const fetchFieldsForQuery =
+      associationSourceKeys.length > 0
+        ? [...new Set([...(Array.isArray(fetchFields) ? fetchFields : []), ...associationSourceKeys])]
+        : fetchFields;
 
     // 对于需要完整记录的场景（preferFullRecord 为 true，例如模板中出现 xxx.record），
     // 缓存键不再区分 fields/appends，只按“全量记录”维度缓存。
     const cacheKeyFields =
-      preferFullRecord && pkIsValid
+      allowedPreferFullRecord && pkIsValid
         ? undefined
-        : Array.isArray(fieldsWithExtras)
-          ? [...fieldsWithExtras].sort()
+        : Array.isArray(allowedFields)
+          ? [...allowedFields].sort()
           : undefined;
-    const cacheKeyAppends = preferFullRecord ? undefined : Array.isArray(appends) ? [...appends].sort() : undefined;
+    const cacheKeyAppends = allowedPreferFullRecord
+      ? undefined
+      : Array.isArray(allowedAppends)
+        ? [...allowedAppends].sort()
+        : undefined;
     const keyObj: {
       ds: string;
       c: string;
       tk: unknown;
       f?: string[];
       a?: string[];
+      filter?: unknown;
+      associationFilters?: Record<string, unknown>;
       full?: boolean;
       assoc?: string;
       sid?: unknown;
     } = {
       ds: dataSourceKey || 'main',
-      c: collection,
+      c: actualCollection,
       tk: filterByTk,
       f: cacheKeyFields,
       a: cacheKeyAppends,
-      full: preferFullRecord ? true : undefined,
+      filter: allowedFilter,
+      associationFilters,
+      full: allowedPreferFullRecord ? true : undefined,
       assoc: associationName,
       sid: typeof sourceId === 'undefined' ? undefined : sourceId,
     };
     const key = JSON.stringify(keyObj);
+    const sanitizeCachedValue = (value: unknown) => sanitizeRecordReadResult(value, readPolicy.projection);
     if (cache) {
       if (cache.has(key)) {
-        return cache.get(key);
+        return sanitizeCachedValue(cache.get(key));
       }
       // 仅当缓存项是本次请求所需 selects 的“超集”时才复用（避免缺字段/关联）。
       // - 对于 preferFullRecord=true 的情况，只要缓存项标记为 full 即可复用（与 fields/appends 无关）。
@@ -277,8 +486,9 @@ async function fetchRecordWithRequestCache(
         // 注意：若 needFields 中某路径已被 cachedAppends 的前缀覆盖（例如 needFields: ['roles.name'] 且 cachedAppends: ['roles']），
         // 则认为该字段已被关联载入，可视为满足。
         const needFields =
-          !preferFullRecord && Array.isArray(fieldsWithExtras) ? [...new Set(fieldsWithExtras)] : undefined;
-        const needAppends = !preferFullRecord && Array.isArray(appends) ? new Set(appends) : undefined;
+          !allowedPreferFullRecord && Array.isArray(allowedFields) ? [...new Set(allowedFields)] : undefined;
+        const needAppends =
+          !allowedPreferFullRecord && Array.isArray(allowedAppends) ? new Set(allowedAppends) : undefined;
         for (const [cacheKey, cacheVal] of cache.entries()) {
           const parsed = JSON.parse(cacheKey) as {
             ds: string;
@@ -286,6 +496,8 @@ async function fetchRecordWithRequestCache(
             tk: unknown;
             f?: string[];
             a?: string[];
+            filter?: unknown;
+            associationFilters?: Record<string, unknown>;
             full?: boolean;
             assoc?: string;
             sid?: unknown;
@@ -295,6 +507,8 @@ async function fetchRecordWithRequestCache(
             parsed.ds !== keyObj.ds ||
             parsed.c !== keyObj.c ||
             !_.isEqual(parsed.tk, keyObj.tk) ||
+            !_.isEqual(parsed.filter, keyObj.filter) ||
+            !_.isEqual(parsed.associationFilters, keyObj.associationFilters) ||
             parsed.assoc !== keyObj.assoc ||
             !_.isEqual(parsed.sid, keyObj.sid)
           )
@@ -318,24 +532,31 @@ async function fetchRecordWithRequestCache(
             ? needFields.every((f) => cachedFields.has(f) || fieldCoveredByAppends(f))
             : parsed.f === undefined;
           const appendsOk = !needAppends || [...needAppends].every((a) => cachedAppends.has(a));
-          const fullOk = preferFullRecord ? parsed.full === true : true;
+          const fullOk = allowedPreferFullRecord ? parsed.full === true : true;
           if (fieldsOk && appendsOk && fullOk) {
-            return cacheVal;
+            return sanitizeCachedValue(cacheVal);
           }
         }
       }
     }
     // 当 preferFullRecord 为 true 时，无论之前如何推导字段/关联，都以“完整记录”维度查询，
     // 确保 ctx.xxx.record 返回的是完整 JSON 记录，而非仅包含部分字段的切片。
-    const json = await fetchRecordOrRecordsJson(repo, {
-      filterByTk: filterByTk as TargetKey,
-      preferFullRecord,
-      fields: fieldsWithExtras,
-      appends,
-      filterTargetKey,
-      pkAttr,
-      pkIsValid,
-    });
+    const json = sanitizeRecordReadResult(
+      await fetchRecordOrRecordsJson(repo, {
+        filterByTk: filterByTk as TargetKey,
+        preferFullRecord: allowedPreferFullRecord,
+        fields: fetchFieldsForQuery,
+        appends: fetchAppends,
+        filter: allowedFilter,
+        filterTargetKey,
+        pkAttr,
+        pkIsValid,
+        associationLoaders: associationLoaders.length ? associationLoaders : undefined,
+        getAssociationRepository: (repositoryName, targetSourceId) =>
+          cm.db.getRepository(repositoryName, targetSourceId as TargetKey),
+      }),
+      readPolicy.projection,
+    );
     if (cache) cache.set(key, json);
     return json;
   } catch (e: unknown) {
@@ -728,6 +949,7 @@ function registerBuiltInVariables(reg: VariableRegistry) {
             undefined,
             undefined,
             undefined,
+            { skipAcl: true },
           );
         },
         cache: true,

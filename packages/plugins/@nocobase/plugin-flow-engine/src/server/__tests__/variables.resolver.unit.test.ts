@@ -8,6 +8,7 @@
  */
 
 import { createMockServer, MockServer } from '@nocobase/test';
+import { vi } from 'vitest';
 import { GlobalContext, HttpRequestContext, ServerBaseContext } from '../template/contexts';
 import { resolveJsonTemplate } from '../template/resolver';
 import { variables } from '../variables/registry';
@@ -40,7 +41,7 @@ describe('variables resolver (no HTTP)', () => {
       app,
       db: app.db,
       auth: { user: { id: userId }, role: 'root' },
-      state: {},
+      state: { currentUser: { id: userId } },
       request: { ip: '127.0.0.1', headers: {}, query: {} },
       getCurrentLocale: () => 'en-US',
       action: { params: {} },
@@ -100,6 +101,29 @@ describe('variables resolver (no HTTP)', () => {
     expect(out.t).toBe('undefined');
   });
 
+  it('does not expose koa context or database handles inside expressions', async () => {
+    const { req } = makeCtx(1);
+    const query = vi.spyOn(app.db.sequelize, 'query');
+    const tpl = {
+      direct: '{{ ctx.koaCtx ? "bad" : "safe" }}',
+      db: '{{ (await __get("koaCtx", ".db.sequelize.query")) ? "bad" : "safe" }}',
+      exploit:
+        '{{ (async () => { const seq = ctx.koaCtx?.db?.sequelize; if (!seq) return "safe"; await seq.query("SELECT 1"); return "bad"; })() }}',
+      internal: '{{ ctx._props ? "bad" : "safe" }}',
+    } as any;
+
+    const out = await resolveJsonTemplate(tpl, req);
+
+    expect(out).toEqual({
+      direct: 'safe',
+      db: 'safe',
+      exploit: 'safe',
+      internal: 'safe',
+    });
+    expect(query).not.toHaveBeenCalled();
+    query.mockRestore();
+  });
+
   it('supports custom ctx methods attached via registry', async () => {
     if (!variables.get('twice')) {
       variables.register({
@@ -113,6 +137,27 @@ describe('variables resolver (no HTTP)', () => {
     await variables.attachUsedVariables(req, koa, tpl, {});
     const out = await resolveJsonTemplate(tpl, req);
     expect(out.v).toBe(42);
+  });
+
+  it('keeps registered methods callable without exposing function constructors', async () => {
+    if (!variables.get('twice')) {
+      variables.register({
+        name: 'twice',
+        scope: 'request',
+        attach: (flowCtx) => flowCtx.defineMethod('twice', (n: any) => Number(n) * 2),
+      });
+    }
+    const { koa, req } = makeCtx(1);
+    const tpl = {
+      value: '{{ ctx.twice(21) }}',
+      ctor: '{{ (await __get("twice")).constructor ? "bad" : "safe" }}',
+      proto: '{{ Object.getPrototypeOf(await __get("twice")) === null ? "safe" : "bad" }}',
+    } as any;
+    await variables.attachUsedVariables(req, koa, tpl, {});
+
+    const out = await resolveJsonTemplate(tpl, req);
+
+    expect(out).toEqual({ value: 42, ctor: 'safe', proto: 'safe' });
   });
 
   describe('server resolver: dot-only path aggregation', () => {

@@ -12,30 +12,108 @@ import { variables } from '../variables/registry';
 import { resetVariablesRegistryForTest } from './test-utils';
 import { resolveJsonTemplate } from '../template/resolver';
 import { HttpRequestContext } from '../template/contexts';
+import { sanitizeRecordReadResult } from '../variables/permissions';
+import { fetchRecordOrRecordsJson } from '../variables/records';
 
-function makeKoaCtx(spy: (opts: any) => void, collectionName = 'users') {
+function makeKoaCtx(
+  spy: (opts: any) => void,
+  collectionName = 'users',
+  options: {
+    acl?: { can?: (opts: any) => any };
+    appAcl?: { can?: (opts: any) => any };
+    dataSourceAcl?: { can?: (opts: any) => any };
+    state?: Record<string, unknown>;
+  } = {},
+) {
   // 为新实现提供必要的模型元数据（rawAttributes/associations/primaryKey）
+  const roleModelMeta = {
+    primaryKeyAttribute: 'name',
+    rawAttributes: {
+      name: {},
+      title: {},
+      internalNote: {},
+      password: {},
+    } as Record<string, unknown>,
+    associations: {
+      users: { target: { name: 'users' } },
+    } as Record<string, unknown>,
+  };
   const modelMeta = {
     primaryKeyAttribute: 'id',
     rawAttributes: {
       id: {},
       name: {},
+      createdById: {},
       // 非关联字段举例；关联在 associations 中声明
     } as Record<string, unknown>,
     associations: {
-      roles: {},
+      roles: { target: { name: 'roles' } },
       company: {},
     } as Record<string, unknown>,
   };
+  const makeCollection = (name: string, meta: typeof modelMeta | typeof roleModelMeta) => ({
+    name,
+    model: meta,
+    getField: (fieldName: string) => {
+      if (name === 'users' && fieldName === 'roles') return { target: 'roles' };
+      if (name === 'roles' && fieldName === 'users') return { target: 'users', sourceKey: 'name' };
+      if (Object.prototype.hasOwnProperty.call(meta.rawAttributes, fieldName)) return {};
+      return undefined;
+    },
+  });
+  const usersCollection = makeCollection('users', modelMeta);
+  const rolesCollection = makeCollection('roles', roleModelMeta);
 
   const repo = {
     // 提供 collection.model，供 fetchRecordWithRequestCache 补充主键/判断最小载荷
-    collection: { model: modelMeta },
+    collection: usersCollection,
+    async find(opts: any) {
+      spy(opts);
+      return [
+        {
+          toJSON() {
+            return {
+              id: 1,
+              name: 'Alice',
+              roles: [{ name: 'admin', title: 'Administrator', internalNote: 'hidden', password: 'hash' }],
+              company: { title: 'Acme' },
+            };
+          },
+        },
+      ] as any;
+    },
     async findOne(opts: any) {
       spy(opts);
       return {
         toJSON() {
-          return { id: 1, name: 'Alice', roles: [{ name: 'admin' }], company: { title: 'Acme' } };
+          return {
+            id: 1,
+            name: 'Alice',
+            roles: [{ name: 'admin', title: 'Administrator', internalNote: 'hidden', password: 'hash' }],
+            company: { title: 'Acme' },
+          };
+        },
+      } as any;
+    },
+  } as any;
+  const rolesRepo = {
+    collection: rolesCollection,
+    targetCollection: rolesCollection,
+    async find(opts: any) {
+      spy(opts);
+      return [
+        {
+          toJSON() {
+            return { name: 'admin', title: 'Administrator', internalNote: 'hidden', password: 'hash' };
+          },
+        },
+      ] as any;
+    },
+    async findOne(opts: any) {
+      spy(opts);
+      return {
+        toJSON() {
+          return { name: 'admin', title: 'Administrator', internalNote: 'hidden', password: 'hash' };
         },
       } as any;
     },
@@ -45,16 +123,22 @@ function makeKoaCtx(spy: (opts: any) => void, collectionName = 'users') {
     app: {
       dataSourceManager: {
         get: () => ({
+          acl: options.dataSourceAcl ?? options.acl,
           collectionManager: {
             db: {
-              getRepository: (name: string) => repo,
+              getRepository: (name: string) => (name === 'roles' || name === 'users.roles' ? rolesRepo : repo),
               // adjustSelectsForCollection 会从这里取模型元数据
-              getCollection: (name: string) => ({ model: modelMeta }),
+              getCollection: (name: string) =>
+                name === 'roles' || name === 'users.roles' ? rolesCollection : usersCollection,
+              getCollectionByModelName: (name: string) =>
+                name === 'roles' ? rolesCollection : name === 'users' ? usersCollection : undefined,
             },
           },
         }),
       },
+      acl: options.appAcl ?? options.acl,
     },
+    state: options.state || {},
   };
   return koa;
 }
@@ -227,6 +311,381 @@ describe('variables registry - extractUsage and attachUsedVariables', () => {
     expect(call.appends).toBeUndefined();
   });
 
+  it('attachUsedVariables(dynamic: view.record): applies ACL scope filters to record queries', async () => {
+    const spyCalls: any[] = [];
+    const koa = makeKoaCtx((opts) => spyCalls.push(opts), 'users', {
+      acl: {
+        can: () => ({
+          params: {
+            fields: ['id', 'name', 'createdById'],
+            filter: {
+              createdById: '{{ ctx.state.currentUser.id }}',
+            },
+          },
+        }),
+      },
+      state: {
+        currentRole: 'member',
+        currentRoles: ['member'],
+        currentUser: { id: 7 },
+      },
+    });
+    const ctx = new HttpRequestContext(koa);
+    const template = {
+      username: '{{ ctx.view.record.name }}',
+    } as any;
+    const contextParams = { 'view.record': { dataSourceKey: 'main', collection: 'users', filterByTk: 1 } } as any;
+    await variables.attachUsedVariables(ctx, koa, template, contextParams);
+    await resolveJsonTemplate(template, ctx as any);
+
+    expect(spyCalls.length).toBe(1);
+    expect(spyCalls[0].filterByTk).toBe(1);
+    expect(spyCalls[0].filter).toEqual({ createdById: 7 });
+    expect(spyCalls[0].fields).toEqual(expect.arrayContaining(['name']));
+  });
+
+  it('attachUsedVariables(dynamic: view.record): uses requested data source ACL before app ACL', async () => {
+    const spyCalls: any[] = [];
+    const koa = makeKoaCtx((opts) => spyCalls.push(opts), 'users', {
+      appAcl: {
+        can: () => ({
+          params: {
+            fields: ['id', 'name'],
+          },
+        }),
+      },
+      dataSourceAcl: {
+        can: () => ({
+          params: {
+            fields: ['id'],
+          },
+        }),
+      },
+      state: {
+        currentRole: 'member',
+        currentRoles: ['member'],
+        currentUser: { id: 7 },
+      },
+    });
+    const ctx = new HttpRequestContext(koa);
+    const template = {
+      id: '{{ ctx.view.record.id }}',
+      name: '{{ ctx.view.record.name }}',
+    } as any;
+    const contextParams = {
+      'view.record': { dataSourceKey: 'archive', collection: 'users', filterByTk: 1 },
+    } as any;
+    await variables.attachUsedVariables(ctx, koa, template, contextParams);
+    const out = await resolveJsonTemplate(template, ctx as any);
+
+    expect(out.id).toBe(1);
+    expect(out.name).toBe('{{ ctx.view.record.name }}');
+    expect(spyCalls[0].fields).toEqual(['id']);
+  });
+
+  it('attachUsedVariables(dynamic: view.record): projects appended association fields through target ACL', async () => {
+    const spyCalls: any[] = [];
+    const koa = makeKoaCtx((opts) => spyCalls.push(opts), 'users', {
+      acl: {
+        can: ({ resource }: { resource: string }) => {
+          if (resource === 'roles') {
+            return { params: { fields: ['name'] } };
+          }
+          return { params: { fields: ['id', 'roles'], appends: ['roles'] } };
+        },
+      },
+      state: {
+        currentRole: 'member',
+        currentRoles: ['member'],
+        currentUser: { id: 7 },
+      },
+    });
+    const ctx = new HttpRequestContext(koa);
+    const template = {
+      roleName: '{{ ctx.view.record.roles[0].name }}',
+      roleInternalNote: '{{ ctx.view.record.roles[0].internalNote }}',
+    } as any;
+    const contextParams = { 'view.record': { dataSourceKey: 'main', collection: 'users', filterByTk: 1 } } as any;
+    await variables.attachUsedVariables(ctx, koa, template, contextParams);
+    const out = await resolveJsonTemplate(template, ctx as any);
+
+    expect(out.roleName).toBe('admin');
+    expect(out.roleInternalNote).toBe('{{ ctx.view.record.roles[0].internalNote }}');
+    expect(spyCalls[0].fields).toEqual(expect.arrayContaining(['roles.name']));
+    expect(spyCalls[0].fields).not.toEqual(expect.arrayContaining(['roles.internalNote']));
+  });
+
+  it('attachUsedVariables(dynamic: view.record): applies target ACL filters to appended associations', async () => {
+    const spyCalls: any[] = [];
+    const koa = makeKoaCtx((opts) => spyCalls.push(opts), 'users', {
+      acl: {
+        can: ({ resource }: { resource: string }) => {
+          if (resource === 'roles') {
+            return { params: { fields: ['name'], filter: { name: 'admin' } } };
+          }
+          return { params: { fields: ['id', 'roles'], appends: ['roles'] } };
+        },
+      },
+      state: {
+        currentRole: 'member',
+        currentRoles: ['member'],
+        currentUser: { id: 7 },
+      },
+    });
+    const ctx = new HttpRequestContext(koa);
+    const template = {
+      roleName: '{{ ctx.view.record.roles[0].name }}',
+      roleInternalNote: '{{ ctx.view.record.roles[0].internalNote }}',
+    } as any;
+    const contextParams = { 'view.record': { dataSourceKey: 'main', collection: 'users', filterByTk: 1 } } as any;
+    await variables.attachUsedVariables(ctx, koa, template, contextParams);
+    const out = await resolveJsonTemplate(template, ctx as any);
+
+    expect(out.roleName).toBe('admin');
+    expect(out.roleInternalNote).toBe('{{ ctx.view.record.roles[0].internalNote }}');
+    expect(spyCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filter: { name: 'admin' },
+          fields: ['name'],
+        }),
+      ]),
+    );
+  });
+
+  it('attachUsedVariables(dynamic: view.record): applies nested target ACL filters to appended associations', async () => {
+    const spyCalls: any[] = [];
+    const koa = makeKoaCtx((opts) => spyCalls.push(opts), 'users', {
+      acl: {
+        can: ({ resource, rawResourceName }: { resource: string; rawResourceName?: string }) => {
+          if (resource === 'roles') {
+            return { params: { fields: ['name', 'users'], appends: ['users'] } };
+          }
+          if (rawResourceName === 'roles.users') {
+            return { params: { fields: ['id', 'name'], filter: { id: 1 } } };
+          }
+          return { params: { fields: ['id', 'roles'], appends: ['roles'] } };
+        },
+      },
+      state: {
+        currentRole: 'member',
+        currentRoles: ['member'],
+        currentUser: { id: 7 },
+      },
+    });
+    const ctx = new HttpRequestContext(koa);
+    const template = {
+      memberName: '{{ ctx.view.record.roles[0].users[0].name }}',
+    } as any;
+    const contextParams = { 'view.record': { dataSourceKey: 'main', collection: 'users', filterByTk: 1 } } as any;
+    await variables.attachUsedVariables(ctx, koa, template, contextParams);
+    const out = await resolveJsonTemplate(template, ctx as any);
+
+    expect(out.memberName).toBe('Alice');
+    expect(spyCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filter: { id: 1 },
+          fields: ['name'],
+        }),
+      ]),
+    );
+  });
+
+  it('attachUsedVariables(dynamic association): denies spoofed collection for association repositories', async () => {
+    const spyCalls: any[] = [];
+    const koa = makeKoaCtx((opts) => spyCalls.push(opts));
+    const ctx = new HttpRequestContext(koa);
+    const template = {
+      roleName: '{{ ctx.popup.record.name }}',
+    } as any;
+    const contextParams = {
+      'popup.record': {
+        dataSourceKey: 'main',
+        collection: 'users',
+        associationName: 'users.roles',
+        sourceId: 1,
+        filterByTk: 'admin',
+      },
+    } as any;
+    await variables.attachUsedVariables(ctx, koa, template, contextParams);
+    const out = await resolveJsonTemplate(template, ctx as any);
+
+    expect(out.roleName).toBe('{{ ctx.popup.record.name }}');
+    expect(spyCalls.length).toBe(0);
+  });
+
+  it('attachUsedVariables(dynamic association): denies associationName without a valid sourceId', async () => {
+    const invalidSourceIds = [undefined, null, '', { createdById: 7 }];
+
+    for (const invalidSourceId of invalidSourceIds) {
+      const spyCalls: any[] = [];
+      const koa = makeKoaCtx((opts) => spyCalls.push(opts));
+      const ctx = new HttpRequestContext(koa);
+      const template = {
+        roleName: '{{ ctx.popup.record.name }}',
+      } as any;
+      const recordParams: Record<string, unknown> = {
+        dataSourceKey: 'main',
+        collection: 'roles',
+        associationName: 'users.roles',
+        filterByTk: 'admin',
+      };
+      if (typeof invalidSourceId !== 'undefined') {
+        recordParams.sourceId = invalidSourceId;
+      }
+      const contextParams = {
+        'popup.record': recordParams,
+      } as any;
+
+      await variables.attachUsedVariables(ctx, koa, template, contextParams);
+      const out = await resolveJsonTemplate(template, ctx as any);
+
+      expect(out.roleName).toBe('{{ ctx.popup.record.name }}');
+      expect(spyCalls.length).toBe(0);
+    }
+  });
+
+  it('sanitizeRecordReadResult removes sensitive fields recursively', () => {
+    const sanitized = sanitizeRecordReadResult({
+      id: 1,
+      password: 'hash',
+      profile: {
+        name: 'Alice',
+        apiKey: 'secret',
+      },
+      users: [
+        { id: 2, name: 'Bob', accessToken: 'token' },
+        { id: 3, name: 'Carol', privateKey: 'key' },
+      ],
+    });
+
+    expect(sanitized).toEqual({
+      id: 1,
+      profile: { name: 'Alice' },
+      users: [
+        { id: 2, name: 'Bob' },
+        { id: 3, name: 'Carol' },
+      ],
+    });
+  });
+
+  it('sanitizeRecordReadResult projects allowed association fields', () => {
+    const sanitized = sanitizeRecordReadResult(
+      {
+        id: 1,
+        name: 'Alice',
+        roles: [{ name: 'admin', internalNote: 'hidden', password: 'hash' }],
+      },
+      {
+        fields: ['id'],
+        associations: {
+          roles: { fields: ['name'] },
+        },
+      },
+    );
+
+    expect(sanitized).toEqual({
+      id: 1,
+      roles: [{ name: 'admin' }],
+    });
+  });
+
+  it('fetchRecordOrRecordsJson rejects invalid scalar filterByTk values before querying', async () => {
+    const calls: any[] = [];
+    const repo = {
+      async findOne(options: any) {
+        calls.push(options);
+        return {
+          toJSON: () => ({ id: options?.filterByTk }),
+        };
+      },
+    };
+
+    await expect(fetchRecordOrRecordsJson(repo, { filterByTk: null })).resolves.toBeUndefined();
+    await expect(fetchRecordOrRecordsJson(repo, { filterByTk: undefined })).resolves.toBeUndefined();
+    await expect(fetchRecordOrRecordsJson(repo, { filterByTk: '' })).resolves.toBeUndefined();
+    await expect(fetchRecordOrRecordsJson(repo, { filterByTk: false })).resolves.toBeUndefined();
+    await expect(fetchRecordOrRecordsJson(repo, { filterByTk: 0 })).resolves.toBeUndefined();
+
+    expect(calls.length).toBe(0);
+  });
+
+  it('fetchRecordOrRecordsJson keeps numeric 0 scoped by filter target key', async () => {
+    const calls: any[] = [];
+    const repo = {
+      async findOne(options: any) {
+        calls.push(options);
+        return {
+          toJSON: () => ({ id: 0 }),
+        };
+      },
+    };
+
+    const out = await fetchRecordOrRecordsJson(repo, {
+      filterByTk: 0,
+      filter: { createdById: 7 },
+      filterTargetKey: 'id',
+    });
+
+    expect(out).toEqual({ id: 0 });
+    expect(calls).toEqual([
+      {
+        fields: undefined,
+        appends: undefined,
+        filter: {
+          $and: [{ createdById: 7 }, { id: 0 }],
+        },
+      },
+    ]);
+  });
+
+  it('fetchRecordOrRecordsJson validates object filterByTk against configured composite target keys', async () => {
+    const calls: any[] = [];
+    const repo = {
+      async findOne(options: any) {
+        calls.push(options);
+        return {
+          toJSON: () => ({ id: 1 }),
+        };
+      },
+    };
+
+    await expect(
+      fetchRecordOrRecordsJson(repo, {
+        filterByTk: { createdById: 7 },
+        filterTargetKey: 'id',
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      fetchRecordOrRecordsJson(repo, {
+        filterByTk: { tenantId: 1 },
+        filterTargetKey: ['tenantId', 'code'],
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      fetchRecordOrRecordsJson(repo, {
+        filterByTk: { tenantId: 1, code: 'A', createdById: 7 },
+        filterTargetKey: ['tenantId', 'code'],
+      }),
+    ).resolves.toBeUndefined();
+
+    const out = await fetchRecordOrRecordsJson(repo, {
+      filterByTk: { tenantId: 1, code: 'A' },
+      filterTargetKey: ['tenantId', 'code'],
+    });
+
+    expect(out).toEqual({ id: 1 });
+    expect(calls).toEqual([
+      {
+        fields: undefined,
+        appends: undefined,
+        filterByTk: { tenantId: 1, code: 'A' },
+        filter: undefined,
+      },
+    ]);
+  });
+
   it('attachUsedVariables(dynamic: view.record): allows fields inference with numeric index after segment', async () => {
     const spyCalls: any[] = [];
     const koa = makeKoaCtx((opts) => spyCalls.push(opts));
@@ -312,6 +771,43 @@ describe('variables registry - extractUsage and attachUsedVariables', () => {
     expect(typeof out.b).toBe('string');
     expect(out.b.length).toBeGreaterThan(0);
     // 由于命中请求级缓存，不应触发任何 DB 查询
+    expect(spyCalls.length).toBe(0);
+  });
+
+  it('request cache superset hits are sanitized with the current ACL projection', async () => {
+    const spyCalls: any[] = [];
+    const koa = makeKoaCtx((opts) => spyCalls.push(opts), 'users', {
+      acl: {
+        can: () => ({
+          params: {
+            fields: ['id'],
+          },
+        }),
+      },
+      state: {
+        currentRole: 'member',
+        currentRoles: ['member'],
+        currentUser: { id: 7 },
+      },
+    });
+    const ctx = new HttpRequestContext(koa);
+    (koa as any).state.__varResolveBatchCache = new Map<string, unknown>();
+    const cacheKey = JSON.stringify({ ds: 'main', c: 'users', tk: 1, f: ['createdById', 'id', 'name'] });
+    (koa as any).state.__varResolveBatchCache.set(cacheKey, {
+      id: 1,
+      name: 'Alice',
+      createdById: 7,
+      password: 'hash',
+    });
+
+    const template = {
+      record: '{{ ctx.view.record }}',
+    } as any;
+    const contextParams = { 'view.record': { dataSourceKey: 'main', collection: 'users', filterByTk: 1 } } as any;
+    await variables.attachUsedVariables(ctx, koa, template, contextParams);
+    const record = await ((ctx as any).view as any).record;
+
+    expect(record).toEqual({ id: 1 });
     expect(spyCalls.length).toBe(0);
   });
 });

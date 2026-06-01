@@ -9,20 +9,8 @@
 
 import 'ses';
 import _ from 'lodash';
-import { getValuesByPath } from '@nocobase/utils/client';
-
-// TODO: 是否有必要lockdown?
-// // 使用 SES 进行隔离
-// declare const lockdown: any;
-// try {
-//   // 测试环境下避免执行全局 lockdown，以免冻结测试依赖（如 Vitest/Chai）
-//   const env = (typeof process !== 'undefined' && (process as any)?.env) ? (process as any).env : {} as any;
-//   if (typeof lockdown === 'function' && env.NODE_ENV !== 'test') {
-//     lockdown({ errorTaming: 'unsafe', consoleTaming: 'unsafe' });
-//   }
-// } catch (_) {
-//   // ignore
-// }
+import { BASE_BLOCKED_IDENTIFIERS, lockdownSes } from '@nocobase/utils';
+import { ServerBaseContext } from './contexts';
 
 export type JSONValue = string | { [key: string]: JSONValue } | JSONValue[];
 
@@ -49,6 +37,265 @@ export async function resolveJsonTemplate(template: JSONValue, ctx: any): Promis
     return source;
   };
   return compile(template);
+}
+
+const BLOCKED_CONTEXT_KEYS = new Set([
+  'acl',
+  'action',
+  'app',
+  'constructor',
+  'database',
+  'db',
+  'emit',
+  'emitAsync',
+  'getCurrentRepository',
+  'koaCtx',
+  'permission',
+  'prototype',
+  'req',
+  'request',
+  'res',
+  'response',
+  'sequelize',
+  'state',
+  '__defineGetter__',
+  '__defineSetter__',
+  '__lookupGetter__',
+  '__lookupSetter__',
+  '__proto__',
+]);
+
+const BLOCKED_SANDBOX_GLOBALS = [
+  ...BASE_BLOCKED_IDENTIFIERS,
+  'process',
+  'require',
+  'module',
+  'exports',
+  '__filename',
+  '__dirname',
+  'Buffer',
+  'setTimeout',
+  'setInterval',
+  'setImmediate',
+  'clearTimeout',
+  'clearInterval',
+  'clearImmediate',
+];
+
+let templateSesLockdownReady = false;
+
+function ensureTemplateSesLockdown() {
+  if (templateSesLockdownReady) return;
+  lockdownSes({
+    consoleTaming: 'unsafe',
+    errorTaming: 'unsafe',
+    overrideTaming: 'moderate',
+    stackFiltering: 'verbose',
+  });
+  templateSesLockdownReady = true;
+}
+
+function isBlockedContextKey(key: unknown) {
+  if (typeof key === 'symbol') return key !== Symbol.iterator;
+  return typeof key !== 'string' || key.startsWith('_') || BLOCKED_CONTEXT_KEYS.has(key);
+}
+
+function getContextInternals(ctx: unknown): {
+  props?: Record<string, unknown>;
+  methods?: Record<string, (...args: unknown[]) => unknown>;
+  delegates?: unknown[];
+} {
+  if (!ctx || typeof ctx !== 'object') return {};
+  const record = ctx as Record<string, unknown>;
+  return {
+    props: record._props as Record<string, unknown> | undefined,
+    methods: record._methods as Record<string, (...args: unknown[]) => unknown> | undefined,
+    delegates: record._delegates as unknown[] | undefined,
+  };
+}
+
+function hasContextMember(ctx: unknown, key: string): boolean {
+  const { props, methods, delegates } = getContextInternals(ctx);
+  if (props && Object.prototype.hasOwnProperty.call(props, key)) return true;
+  if (methods && Object.prototype.hasOwnProperty.call(methods, key)) return true;
+  if (Array.isArray(delegates) && delegates.some((delegate) => hasContextMember(delegate, key))) return true;
+  if (!props && !methods && !delegates && ctx && typeof ctx === 'object') {
+    return Object.prototype.hasOwnProperty.call(ctx, key);
+  }
+  return false;
+}
+
+function createSafeValue(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+  if (value == null) return value;
+  if (typeof value !== 'object' && typeof value !== 'function') return value;
+
+  if (value instanceof Date) return value.toISOString();
+
+  if (typeof (value as { then?: unknown }).then === 'function') {
+    return (value as Promise<unknown>).then((resolved) => createSafeValue(resolved, seen));
+  }
+
+  const target = value as object;
+  if (seen.has(target)) return seen.get(target);
+
+  if (typeof value === 'function') {
+    const safeFn = new Proxy(value as (...args: unknown[]) => unknown, {
+      apply(fn, thisArg, argArray) {
+        return createSafeValue(Reflect.apply(fn, thisArg, argArray), seen);
+      },
+      get() {
+        return undefined;
+      },
+      getPrototypeOf() {
+        return null;
+      },
+      set() {
+        return false;
+      },
+      defineProperty() {
+        return false;
+      },
+      deleteProperty() {
+        return false;
+      },
+    });
+    seen.set(target, safeFn);
+    return safeFn;
+  }
+
+  if (typeof (value as { toJSON?: unknown }).toJSON === 'function' && !Array.isArray(value)) {
+    try {
+      const json = (value as { toJSON: () => unknown }).toJSON();
+      if (json !== value) return createSafeValue(json, seen);
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  if (Array.isArray(value)) {
+    const safeArray: unknown[] = [];
+    seen.set(target, safeArray);
+    for (const item of value) {
+      safeArray.push(createSafeValue(item, seen));
+    }
+    return safeArray;
+  }
+
+  const safeObj = Object.create(null) as Record<string | symbol, unknown>;
+  seen.set(target, safeObj);
+
+  for (const key of Reflect.ownKeys(target)) {
+    if (isBlockedContextKey(key)) continue;
+    const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+    if (!descriptor) continue;
+
+    let rawValue: unknown;
+    if ('value' in descriptor) {
+      rawValue = descriptor.value;
+    } else if (descriptor.get) {
+      try {
+        rawValue = Reflect.get(target, key, target);
+      } catch (_) {
+        continue;
+      }
+    } else {
+      continue;
+    }
+
+    const safeValue = createSafeValue(rawValue, seen);
+    if (typeof safeValue === 'undefined') continue;
+    Object.defineProperty(safeObj, key, {
+      configurable: true,
+      enumerable: descriptor.enumerable ?? true,
+      writable: false,
+      value: safeValue,
+    });
+  }
+
+  return safeObj;
+}
+
+function readSafeProperty(obj: object, key: string | symbol, receiver?: unknown) {
+  if (key === Symbol.iterator && Array.isArray(obj)) return Array.prototype[Symbol.iterator].bind(obj);
+  if (typeof key !== 'string' || isBlockedContextKey(key)) return undefined;
+  if (Array.isArray(obj) && key === 'length') return obj.length;
+  if (Object.prototype.hasOwnProperty.call(obj, key)) {
+    return Reflect.get(obj, key, receiver ?? obj);
+  }
+  return undefined;
+}
+
+function createSafeContext(ctx: ServerBaseContext) {
+  return new Proxy(Object.create(null), {
+    get(_target, key) {
+      if (isBlockedContextKey(key)) return undefined;
+      return getContextValue(ctx, key);
+    },
+    has(_target, key) {
+      return typeof key === 'string' && !isBlockedContextKey(key) && hasContextMember(ctx, key);
+    },
+    ownKeys() {
+      const keys = new Set<string>();
+      const visit = (node: unknown) => {
+        const { props, methods, delegates } = getContextInternals(node);
+        for (const key of [...Object.keys(props || {}), ...Object.keys(methods || {})]) {
+          if (!isBlockedContextKey(key)) keys.add(key);
+        }
+        if (Array.isArray(delegates)) {
+          delegates.forEach(visit);
+        }
+        if (!props && !methods && !delegates && node && typeof node === 'object') {
+          for (const key of Object.keys(node)) {
+            if (!isBlockedContextKey(key)) keys.add(key);
+          }
+        }
+      };
+      visit(ctx);
+      return Array.from(keys);
+    },
+    getOwnPropertyDescriptor(_target, key) {
+      if (typeof key !== 'string' || isBlockedContextKey(key) || !hasContextMember(ctx, key)) return undefined;
+      return {
+        configurable: true,
+        enumerable: true,
+        get: () => getContextValue(ctx, key),
+      };
+    },
+    getPrototypeOf() {
+      return null;
+    },
+  });
+}
+
+function getContextValue(ctx: ServerBaseContext, key: string | symbol) {
+  if (isBlockedContextKey(key)) return undefined;
+  const name = key as string;
+  if (!hasContextMember(ctx, name)) return undefined;
+  return createSafeValue((ctx as Record<string, unknown>)[name]);
+}
+
+function createSandboxEndowments(ctx: ServerBaseContext) {
+  const blockedGlobals = Object.fromEntries(BLOCKED_SANDBOX_GLOBALS.map((key) => [key, undefined]));
+  const safeConsole = {
+    debug: (...args: unknown[]) => console.debug(...args),
+    error: (...args: unknown[]) => console.error(...args),
+    info: (...args: unknown[]) => console.info(...args),
+    log: (...args: unknown[]) => console.log(...args),
+    warn: (...args: unknown[]) => console.warn(...args),
+  };
+
+  return {
+    ...blockedGlobals,
+    ctx: createSafeContext(ctx),
+    __get: createSafeValue((varName: string, path?: string) => getAtPath(ctx, varName, path)),
+    console: createSafeValue(safeConsole),
+  };
+}
+
+function skipWhitespace(expression: string, index: number) {
+  let i = index;
+  while (i < expression.length && /\s/.test(expression[i])) i += 1;
+  return i;
 }
 
 async function replacePlaceholders(input: string, ctx: any) {
@@ -83,7 +330,7 @@ async function evaluate(expr: string, ctx: any) {
     if (dotOnly) {
       const first = dotOnly[1];
       const rest = dotOnly[2];
-      const base = await ctx[first];
+      const base = await getContextValue(ctx, first);
       if (!rest) return base;
       // 使用异步版本取值，逐段 await，并保留数组场景下的隐式聚合语义
       const resolved = await asyncGetValuesByPath(base, rest);
@@ -95,11 +342,8 @@ async function evaluate(expr: string, ctx: any) {
     }
 
     const transformed = preprocessExpression(raw);
-    const compartment = new Compartment({
-      ctx,
-      __get: (varName: string, path?: string) => getAtPath(ctx, varName, path),
-      console,
-    });
+    ensureTemplateSesLockdown();
+    const compartment = new Compartment(createSandboxEndowments(ctx));
     const wrapped = `(async () => { try { return ${transformed}; } catch (e) { return undefined; } })()`;
     return await compartment.evaluate(wrapped);
   } catch (_) {
@@ -112,14 +356,14 @@ async function evaluate(expr: string, ctx: any) {
 async function getAtPath(ctx: any, varName: string, path?: string) {
   try {
     // base may be Promise; wait once
-    let current = await ctx[varName];
+    let current = await getContextValue(ctx, varName);
     if (!path) return current;
     const norm = String(path || '').replace(/^\./, '');
     const segments = _.toPath(norm);
     for (const seg of segments) {
       if (current == null) return undefined;
-      let val = current[seg];
-      if (val && typeof val['then'] === 'function') {
+      let val = readSafeProperty(Object(current), seg);
+      if (val && typeof (val as { then?: unknown }).then === 'function') {
         val = await val;
       }
       current = val;
@@ -154,9 +398,19 @@ async function asyncGetValuesByPath(obj: any, path: string, defaultValue?: any):
 
       // 数组：对每个元素递归解析剩余路径并聚合
       if (Array.isArray(currentValue)) {
+        if (key === 'length') {
+          currentValue = currentValue.length;
+          if (i === keys.length - 1) {
+            result.push(currentValue);
+          }
+          continue;
+        }
+
         shouldReturnArray = true;
         const rest = keys.slice(i).join('.');
-        const parts = await Promise.all(currentValue.map((el) => asyncGetValuesByPath(el, rest, defaultValue)));
+        const parts = await Promise.all(
+          Array.from(currentValue as unknown[]).map((el) => asyncGetValuesByPath(el, rest, defaultValue)),
+        );
         // 将数组或标量统一拍平一层
         for (const p of parts) {
           if (Array.isArray(p)) result.push(...p);
@@ -166,8 +420,8 @@ async function asyncGetValuesByPath(obj: any, path: string, defaultValue?: any):
       }
 
       // 普通对象属性访问，若为 Promise 则等待
-      let val = currentValue?.[key];
-      if (val && typeof (val as any).then === 'function') {
+      let val = readSafeProperty(Object(currentValue), key);
+      if (val && typeof (val as { then?: unknown }).then === 'function') {
         val = await val;
       }
       currentValue = val;
@@ -252,11 +506,13 @@ export function preprocessExpression(expression: string): string {
       if (expression[j] === '.') {
         const m = /^\.[a-zA-Z_$][a-zA-Z0-9_$]*/.exec(expression.slice(j));
         if (!m) break;
+        if (expression[skipWhitespace(expression, j + m[0].length)] === '(') break;
         pathStr += m[0];
         j += m[0].length;
       } else if (expression[j] === '[') {
         const m = /^(\[(?:\d+|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\])/.exec(expression.slice(j));
         if (!m) break;
+        if (expression[skipWhitespace(expression, j + m[1].length)] === '(') break;
         pathStr += m[1];
         j += m[1].length;
       } else {

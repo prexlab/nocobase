@@ -17,15 +17,15 @@ describe('plugin-flow-engine variables:resolve (no HTTP)', () => {
   beforeAll(() => {
     resetVariablesRegistryForTest();
   });
-  const execResolve = async (values: any, userId?: number) => {
+  const execResolve = async (values: any, userId?: number, role = 'root') => {
     const action = app.resourceManager.getAction('variables', 'resolve');
     const ctx: any = {
       app,
       db: app.db,
       headers: {},
       request: { method: 'POST', path: '/api/variables:resolve', query: {}, body: values },
-      auth: userId ? { user: { id: userId }, role: 'root' } : {},
-      state: {},
+      auth: userId ? { user: { id: userId }, role } : {},
+      state: userId ? { currentRole: role, currentRoles: [role], currentUser: { id: userId } } : {},
       getCurrentLocale: () => 'en-US',
     };
     ctx.get = (name: string) => ctx.headers?.[name] || ctx.headers?.[name?.toLowerCase?.()] || undefined;
@@ -97,6 +97,23 @@ describe('plugin-flow-engine variables:resolve (no HTTP)', () => {
     expect(data.userId).toBe(1);
   });
 
+  it('should not expose database handles through variables:resolve expressions', async () => {
+    const query = vi.spyOn(app.db.sequelize, 'query');
+    const payload = {
+      template: {
+        result:
+          '{{ (async () => { const seq = ctx.koaCtx?.db?.sequelize; if (!seq) return "safe"; await seq.query("SELECT 1"); return "bad"; })() }}',
+      },
+    };
+
+    const res = await execResolve(payload, 1);
+    const data = res.body?.data ?? res.body;
+
+    expect(data.result).toBe('safe');
+    expect(query).not.toHaveBeenCalled();
+    query.mockRestore();
+  });
+
   it('should support values.template field', async () => {
     const payload = { template: { time: '{{ ctx.timestamp }}' } };
     const res = await execResolve(payload, 1);
@@ -141,6 +158,29 @@ describe('plugin-flow-engine variables:resolve (no HTTP)', () => {
     const data = res.body?.data ?? res.body;
     expect(data.id).toBe(1);
     expect(data.name).toBe('{{ ctx.view.record.name }}');
+  });
+
+  it('should not resolve sensitive fields from record context params', async () => {
+    const payload = {
+      template: {
+        id: '{{ ctx.view.record.id }}',
+        password: '{{ ctx.view.record.password }}',
+      },
+      contextParams: {
+        'view.record': {
+          dataSourceKey: 'main',
+          collection: 'users',
+          filterByTk: 1,
+          fields: ['id', 'password'],
+        },
+      },
+    };
+
+    const res = await execResolve(payload, 1);
+    const data = res.body?.data ?? res.body;
+
+    expect(data.id).toBe(1);
+    expect(data.password).toBe('{{ ctx.view.record.password }}');
   });
 
   it('should merge top-level record params with deep record params (deep wins)', async () => {

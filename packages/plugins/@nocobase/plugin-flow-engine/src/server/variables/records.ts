@@ -9,12 +9,46 @@
 
 type FilterTargetKey = string | string[] | undefined;
 
+export type AssociationReadInstruction = {
+  associationName: string;
+  repositoryName: string;
+  sourceKey?: string;
+  fields?: string[];
+  appends?: string[];
+  filter?: unknown;
+  children?: AssociationReadInstruction[];
+};
+
 function uniqStrings(list: string[]) {
   return Array.from(new Set(list));
 }
 
 function isPrimitiveTkArray(arr: unknown[]): arr is Array<string | number> {
   return arr.every((v) => typeof v === 'string' || typeof v === 'number');
+}
+
+function isValidScalarTargetKey(value: unknown): value is string | number {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string') return value.length > 0;
+  return false;
+}
+
+function isValidCompositeTargetKey(value: unknown, filterTargetKey: string[]): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const expectedKeys = filterTargetKey.filter(Boolean);
+  if (!expectedKeys.length) return false;
+
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== expectedKeys.length) return false;
+
+  const expected = new Set(expectedKeys);
+  return keys.every((key) => expected.has(key) && isValidScalarTargetKey(record[key]));
+}
+
+function isValidTargetKey(value: unknown, filterTargetKey?: FilterTargetKey): boolean {
+  if (Array.isArray(filterTargetKey)) return isValidCompositeTargetKey(value, filterTargetKey);
+  return isValidScalarTargetKey(value);
 }
 
 function getOrderKey(options: {
@@ -82,6 +116,71 @@ function toJsonArray(rows: unknown): any[] {
   return rows.map((r: any) => (r?.toJSON ? r.toJSON() : r));
 }
 
+function toJsonValue(row: unknown): unknown {
+  if (Array.isArray(row)) return toJsonArray(row);
+  if (row && typeof row === 'object' && typeof (row as { toJSON?: unknown }).toJSON === 'function') {
+    return (row as { toJSON: () => unknown }).toJSON();
+  }
+  return row;
+}
+
+function getRecordSourceId(record: unknown, filterByTk: unknown, sourceKey?: string) {
+  if (record && typeof record === 'object' && !Array.isArray(record) && sourceKey) {
+    const value = (record as Record<string, unknown>)[sourceKey];
+    if (isValidScalarTargetKey(value)) return value;
+  }
+  if (isValidScalarTargetKey(filterByTk)) return filterByTk;
+  return undefined;
+}
+
+async function hydrateAssociationReads(
+  value: unknown,
+  params: {
+    filterByTk: unknown;
+    associationLoaders?: AssociationReadInstruction[];
+    getAssociationRepository?: (repositoryName: string, sourceId: string | number) => any;
+  },
+  fallbackTk: unknown = params.filterByTk,
+) {
+  const { associationLoaders, getAssociationRepository } = params;
+  if (!associationLoaders?.length || !getAssociationRepository || value == null) return value;
+
+  const records = Array.isArray(value) ? value : [value];
+  for (const record of records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+
+    for (const loader of associationLoaders) {
+      const sourceId = getRecordSourceId(record, fallbackTk, loader.sourceKey);
+      const recordObject = record as Record<string, unknown>;
+      let associationValue = recordObject[loader.associationName];
+
+      if ((loader.filter || typeof associationValue === 'undefined') && isValidScalarTargetKey(sourceId)) {
+        const repo = getAssociationRepository(loader.repositoryName, sourceId);
+        const rows = await repo.find({
+          fields: loader.fields,
+          appends: loader.appends,
+          filter: loader.filter,
+        });
+        associationValue = toJsonValue(rows);
+        recordObject[loader.associationName] = associationValue;
+      }
+
+      if (loader.children?.length && typeof associationValue !== 'undefined') {
+        await hydrateAssociationReads(
+          associationValue,
+          {
+            filterByTk: undefined,
+            associationLoaders: loader.children,
+            getAssociationRepository,
+          },
+          undefined,
+        );
+      }
+    }
+  }
+  return value;
+}
+
 /**
  * best-effort: 保持 filterByTk 顺序（仅处理单字段 targetKey + 原始值数组）。
  */
@@ -126,6 +225,38 @@ function reorderRecordsByFilterByTk(
   return ordered;
 }
 
+function mergeFilter(base: unknown, targetKeyFilter: Record<string, unknown>) {
+  if (!base || (typeof base === 'object' && Object.keys(base).length === 0)) return targetKeyFilter;
+  return {
+    $and: [base, targetKeyFilter],
+  };
+}
+
+function buildFindOptions(params: {
+  filterByTk: unknown;
+  filter?: unknown;
+  preferFullRecord?: boolean;
+  fields?: string[];
+  appends?: string[];
+  filterTargetKey?: FilterTargetKey;
+}) {
+  const { filterByTk, filter, preferFullRecord, fields, appends, filterTargetKey } = params;
+  const selectOptions = preferFullRecord ? {} : { fields, appends };
+
+  if (filterByTk === 0 && typeof filterTargetKey === 'string') {
+    return {
+      ...selectOptions,
+      filter: mergeFilter(filter, { [filterTargetKey]: 0 }),
+    };
+  }
+
+  return {
+    ...selectOptions,
+    filterByTk: filterByTk as any,
+    filter,
+  };
+}
+
 /**
  * 根据 filterByTk 类型（单值/数组）查询并返回 JSON 数据：
  * - 单值：返回 object | undefined
@@ -138,25 +269,38 @@ export async function fetchRecordOrRecordsJson(
     preferFullRecord?: boolean;
     fields?: string[];
     appends?: string[];
+    filter?: unknown;
     filterTargetKey?: FilterTargetKey;
     pkAttr?: string;
     pkIsValid?: boolean;
+    associationLoaders?: AssociationReadInstruction[];
+    getAssociationRepository?: (repositoryName: string, sourceId: string | number) => any;
   },
 ): Promise<unknown> {
-  const { filterByTk, preferFullRecord, fields, appends } = params;
+  const { filterByTk, preferFullRecord, fields, appends, filter } = params;
 
   if (Array.isArray(filterByTk)) {
     if (filterByTk.length === 0) return [];
+    if (!filterByTk.every((item) => isValidTargetKey(item, params.filterTargetKey))) return [];
 
-    const rows = await repo.find(
-      preferFullRecord ? { filterByTk: filterByTk as any } : { filterByTk: filterByTk as any, fields, appends },
-    );
+    const rows = await repo.find(buildFindOptions({ filterByTk, preferFullRecord, fields, appends, filter }));
     const jsonArr = toJsonArray(rows);
-    return reorderRecordsByFilterByTk(jsonArr, filterByTk, params);
+    const ordered = reorderRecordsByFilterByTk(jsonArr, filterByTk, params);
+    return await hydrateAssociationReads(ordered, params);
   }
 
+  if (!isValidTargetKey(filterByTk, params.filterTargetKey)) return undefined;
+  if (filterByTk === 0 && typeof params.filterTargetKey !== 'string') return undefined;
+
   const rec = await repo.findOne(
-    preferFullRecord ? { filterByTk: filterByTk as any } : { filterByTk: filterByTk as any, fields, appends },
+    buildFindOptions({
+      filterByTk,
+      preferFullRecord,
+      fields,
+      appends,
+      filter,
+      filterTargetKey: params.filterTargetKey,
+    }),
   );
-  return rec ? rec.toJSON() : undefined;
+  return rec ? await hydrateAssociationReads(rec.toJSON(), params) : undefined;
 }
