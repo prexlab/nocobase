@@ -21,11 +21,13 @@ describe('variables:resolve batch prefetch merges selects (integration)', () => 
     const ctx: any = {
       app,
       db: app.db,
+      cache: app.cache,
       headers: {},
       request: { method: 'POST', path: '/api/variables:resolve', query: {}, body: values },
       auth: userId ? { user: { id: userId }, role: 'root' } : {},
-      state: {},
+      state: userId ? { currentRole: 'root', currentRoles: ['root'], currentUser: { id: userId } } : {},
       getCurrentLocale: () => 'en-US',
+      t: (key: string) => key,
     };
     ctx.get = (name: string) => ctx.headers?.[name] || ctx.headers?.[name?.toLowerCase?.()] || undefined;
     ctx.throw = (status: number, body: any) => {
@@ -48,7 +50,16 @@ describe('variables:resolve batch prefetch merges selects (integration)', () => 
 
   beforeAll(async () => {
     app = await createMockServer({
-      plugins: ['error-handler', 'auth', 'users', 'acl', 'data-source-manager', 'field-sort', 'flow-engine'],
+      plugins: [
+        'error-handler',
+        'auth',
+        'users',
+        'acl',
+        'data-source-manager',
+        'system-settings',
+        'field-sort',
+        'flow-engine',
+      ],
     });
   });
 
@@ -61,11 +72,13 @@ describe('variables:resolve batch prefetch merges selects (integration)', () => 
     const ds: any = app.dataSourceManager.get('main');
     const cm = ds.collectionManager;
     const db = cm.db;
-    const originalGetRepository = db.getRepository.bind(db);
+    const originalGetRepository = db.getRepository;
+    const wrappedRepos = new WeakSet<object>();
     let calls = 0;
-    (db as any).getRepository = (collection: string) => {
-      const repo = originalGetRepository(collection);
-      if (collection === 'users') {
+    (db as any).getRepository = function getRepository(collection: string, ...args: unknown[]) {
+      const repo = originalGetRepository.call(this, collection, ...args);
+      if (collection === 'users' && repo && typeof repo === 'object' && !wrappedRepos.has(repo)) {
+        wrappedRepos.add(repo);
         const originalFindOne = repo.findOne.bind(repo);
         repo.findOne = async (opts: any) => {
           calls += 1;
@@ -90,15 +103,19 @@ describe('variables:resolve batch prefetch merges selects (integration)', () => 
       ],
     };
 
-    const res = await execResolve(payload, 1);
-    const results = res.body?.results || [];
-    const r1 = results.find((r: any) => r.id === 't1');
-    const r2 = results.find((r: any) => r.id === 't2');
-    expect(r1?.data?.a).toBe(1);
-    expect(typeof r2?.data?.b).toBe('string');
-    expect((r2?.data?.b || '').length).toBeGreaterThan(0);
+    try {
+      const res = await execResolve(payload, 1);
+      const results = res.body?.results || [];
+      const r1 = results.find((r: any) => r.id === 't1');
+      const r2 = results.find((r: any) => r.id === 't2');
+      expect(r1?.data?.a).toBe(1);
+      expect(typeof r2?.data?.b).toBe('string');
+      expect((r2?.data?.b || '').length).toBeGreaterThan(0);
 
-    // ensure only one DB call for users collection due to prefetch merge
-    expect(calls).toBe(1);
+      // ensure only one DB call for users collection due to prefetch merge
+      expect(calls).toBe(1);
+    } finally {
+      db.getRepository = originalGetRepository;
+    }
   });
 });

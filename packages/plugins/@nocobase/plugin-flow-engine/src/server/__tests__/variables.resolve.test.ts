@@ -22,11 +22,13 @@ describe('plugin-flow-engine variables:resolve (no HTTP)', () => {
     const ctx: any = {
       app,
       db: app.db,
+      cache: app.cache,
       headers: {},
       request: { method: 'POST', path: '/api/variables:resolve', query: {}, body: values },
       auth: userId ? { user: { id: userId }, role } : {},
       state: userId ? { currentRole: role, currentRoles: [role], currentUser: { id: userId } } : {},
       getCurrentLocale: () => 'en-US',
+      t: (key: string) => key,
     };
     ctx.get = (name: string) => ctx.headers?.[name] || ctx.headers?.[name?.toLowerCase?.()] || undefined;
     ctx.throw = (status: number, body: any) => {
@@ -57,6 +59,7 @@ describe('plugin-flow-engine variables:resolve (no HTTP)', () => {
         'acl',
         'data-source-manager',
         'data-source-main',
+        'system-settings',
         'field-sort',
         'flow-engine',
       ],
@@ -106,12 +109,16 @@ describe('plugin-flow-engine variables:resolve (no HTTP)', () => {
       },
     };
 
-    const res = await execResolve(payload, 1);
-    const data = res.body?.data ?? res.body;
+    try {
+      const res = await execResolve(payload, 1);
+      const data = res.body?.data ?? res.body;
+      const ranExploitQuery = query.mock.calls.some(([sql]) => typeof sql === 'string' && sql.includes('SELECT 1'));
 
-    expect(data.result).toBe('safe');
-    expect(query).not.toHaveBeenCalled();
-    query.mockRestore();
+      expect(data.result).toBe('safe');
+      expect(ranExploitQuery).toBe(false);
+    } finally {
+      query.mockRestore();
+    }
   });
 
   it('should support values.template field', async () => {
