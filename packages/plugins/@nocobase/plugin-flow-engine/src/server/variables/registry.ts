@@ -199,30 +199,32 @@ function getAssociationFieldSelections(items: string[] | undefined, associationN
   return selections.length ? [...new Set(selections)] : undefined;
 }
 
-function getCollectionSourceKey(collection: {
-  filterTargetKey?: string | string[];
-  model?: { primaryKeyAttribute?: string; rawAttributes?: Record<string, unknown> };
-}) {
-  const pkAttr = collection?.model?.primaryKeyAttribute;
-  if (pkAttr && collection?.model?.rawAttributes?.[pkAttr]) return pkAttr;
-  return typeof collection?.filterTargetKey === 'string' ? collection.filterTargetKey : undefined;
+type CollectionSourceInfo = {
+  filterTargetKey?: string | string[] | null;
+  model?: {
+    primaryKeyAttribute?: string;
+    rawAttributes?: Record<string, unknown>;
+    associations?: Record<string, { sourceKey?: string }>;
+  };
+  getField?: (fieldName: string) => unknown;
+};
+
+function getCollectionSourceKey(collection: unknown) {
+  const sourceInfo = collection as CollectionSourceInfo | undefined;
+  const pkAttr = sourceInfo?.model?.primaryKeyAttribute;
+  if (pkAttr && sourceInfo?.model?.rawAttributes?.[pkAttr]) return pkAttr;
+  return typeof sourceInfo?.filterTargetKey === 'string' ? sourceInfo.filterTargetKey : undefined;
 }
 
-function getAssociationSourceKey(
-  collection: {
-    filterTargetKey?: string | string[];
-    model?: {
-      primaryKeyAttribute?: string;
-      rawAttributes?: Record<string, unknown>;
-      associations?: Record<string, { sourceKey?: string }>;
-    };
-    getField?: (fieldName: string) => { sourceKey?: string } | undefined;
-  },
-  associationName: string,
-) {
+function getAssociationSourceKey(collection: unknown, associationName: string) {
+  const sourceInfo = collection as CollectionSourceInfo | undefined;
+  const field = sourceInfo?.getField?.(associationName) as
+    | { sourceKey?: string; options?: { sourceKey?: string } }
+    | undefined;
   return (
-    collection?.getField?.(associationName)?.sourceKey ||
-    collection?.model?.associations?.[associationName]?.sourceKey ||
+    field?.sourceKey ||
+    field?.options?.sourceKey ||
+    sourceInfo?.model?.associations?.[associationName]?.sourceKey ||
     getCollectionSourceKey(collection)
   );
 }
