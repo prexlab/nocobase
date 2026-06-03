@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "name": "@bizblock/plugin-google-calendar-sync",
+  "displayName": "BizBlock Google Calendar Sync",
+  "description": "PoC plugin for Google OAuth and Google Calendar list retrieval.",
+  "version": "0.1.0",
+  "main": "dist/server/index.js",
+  "peerDependencies": {
+    "@nocobase/client": "2.x",
+    "@nocobase/client-v2": "2.x",
+    "@nocobase/server": "2.x"
+  }
+}
