@@ -14,6 +14,7 @@ const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
 const GOOGLE_CALENDAR_LIST_URL = 'https://www.googleapis.com/calendar/v3/users/me/calendarList';
+const GOOGLE_CALENDAR_EVENTS_BASE_URL = 'https://www.googleapis.com/calendar/v3/calendars';
 
 const GOOGLE_SCOPES = [
   'openid',
@@ -30,6 +31,14 @@ type GoogleCalendarSummary = {
   timeZone?: string;
 };
 
+type GoogleCalendarEvent = {
+  id?: string;
+  etag?: string;
+  htmlLink?: string;
+  status?: string;
+  updated?: string;
+};
+
 export class BizBlockGoogleCalendarSyncServer extends Plugin {
   async load() {
     this.app.resourceManager.define({
@@ -41,13 +50,24 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
         callback: this.callback,
         status: this.status,
         listCalendars: this.listCalendars,
+        listSchedules: this.listSchedules,
+        createSampleSchedule: this.createSampleSchedule,
         disconnect: this.disconnect,
       },
     });
 
     this.app.acl.allow(
       'googleCalendarPoc',
-      ['getSettings', 'setSettings', 'authorize', 'status', 'listCalendars', 'disconnect'],
+      [
+        'getSettings',
+        'setSettings',
+        'authorize',
+        'status',
+        'listCalendars',
+        'listSchedules',
+        'createSampleSchedule',
+        'disconnect',
+      ],
       'loggedIn',
     );
     this.app.acl.allow('googleCalendarPoc', 'callback', 'public');
@@ -241,6 +261,91 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     await next();
   };
 
+  listSchedules = async (ctx, next) => {
+    const userId = this.getCurrentUserId(ctx);
+    const schedules = await ctx.db.getRepository('googleCalendarPocSchedules').find({
+      filter: { userId },
+      sort: ['-createdAt'],
+      limit: 20,
+    });
+
+    ctx.body = {
+      schedules: schedules.map((schedule) => this.recordToJSON(schedule)),
+    };
+    await next();
+  };
+
+  createSampleSchedule = async (ctx, next) => {
+    const userId = this.getCurrentUserId(ctx);
+    const settings = await this.requireSettings(ctx);
+    const tokenRepo = ctx.db.getRepository('googleCalendarPocTokens');
+    const tokenRecord = await tokenRepo.findOne({ filter: { userId } });
+
+    if (!tokenRecord || !this.getValue(tokenRecord, 'refreshToken')) {
+      ctx.throw(400, 'Google 認証がまだ完了していません');
+    }
+
+    const accessToken = await this.ensureAccessToken(ctx, tokenRecord, settings);
+    const primaryCalendar = await this.ensurePrimaryCalendar(ctx, tokenRepo, tokenRecord, accessToken);
+    const values = ctx.action?.params?.values || {};
+    const scheduleValues = this.buildSampleScheduleValues(ctx, values);
+    const scheduleRepo = ctx.db.getRepository('googleCalendarPocSchedules');
+    const scheduleRecord = await scheduleRepo.create({
+      values: {
+        ...scheduleValues,
+        userId,
+        googleCalendarId: primaryCalendar.id,
+        syncStatus: 'pending',
+        syncSource: 'bizblock',
+      },
+    });
+
+    try {
+      const event = await this.createGoogleCalendarEvent(accessToken, primaryCalendar.id, scheduleValues);
+      if (!event.id) {
+        ctx.throw(502, 'Google Calendar event id を取得できませんでした');
+      }
+
+      await scheduleRepo.update({
+        filter: { id: this.getValue(scheduleRecord, 'id') },
+        values: {
+          googleCalendarId: primaryCalendar.id,
+          googleEventId: event.id,
+          googleEventEtag: event.etag || '',
+          googleHtmlLink: event.htmlLink || '',
+          syncStatus: 'synced',
+          syncSource: 'bizblock',
+          lastSyncedAt: new Date(),
+          lastError: '',
+        },
+      });
+
+      const syncedSchedule = await scheduleRepo.findOne({ filter: { id: this.getValue(scheduleRecord, 'id') } });
+      ctx.body = {
+        schedule: this.recordToJSON(syncedSchedule),
+        event: {
+          id: event.id,
+          etag: event.etag || '',
+          htmlLink: event.htmlLink || '',
+          status: event.status || '',
+          updated: event.updated || '',
+        },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await scheduleRepo.update({
+        filter: { id: this.getValue(scheduleRecord, 'id') },
+        values: {
+          syncStatus: 'error',
+          lastError: message,
+        },
+      });
+      throw error;
+    }
+
+    await next();
+  };
+
   disconnect = async (ctx, next) => {
     const userId = this.getCurrentUserId(ctx);
     await ctx.db.getRepository('googleCalendarPocTokens').destroy({ filter: { userId } });
@@ -388,6 +493,104 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     }));
   }
 
+  private async ensurePrimaryCalendar(
+    ctx,
+    tokenRepo,
+    tokenRecord,
+    accessToken: string,
+  ): Promise<GoogleCalendarSummary> {
+    const token = this.recordToJSON(tokenRecord) || {};
+    const storedCalendars = Array.isArray(token.calendars) ? token.calendars : [];
+    const storedPrimary = storedCalendars.find((calendar) => calendar.primary && calendar.id);
+    if (storedPrimary) {
+      return storedPrimary;
+    }
+
+    const calendars = await this.fetchCalendarList(accessToken);
+    const primaryCalendar = calendars.find((calendar) => calendar.primary && calendar.id);
+    if (!primaryCalendar) {
+      ctx.throw(400, 'primary カレンダーが見つかりません。カレンダー一覧を更新してから再実行してください');
+    }
+
+    await tokenRepo.update({
+      filter: { id: this.getValue(tokenRecord, 'id') },
+      values: {
+        calendars,
+        selectedCalendarId: primaryCalendar.id,
+        lastFetchedAt: new Date(),
+        isActive: true,
+      },
+    });
+
+    return primaryCalendar;
+  }
+
+  private buildSampleScheduleValues(ctx, values) {
+    const startAt = values.startAt ? new Date(values.startAt) : new Date(Date.now() + 60 * 60 * 1000);
+    const endAt = values.endAt ? new Date(values.endAt) : new Date(startAt.getTime() + 30 * 60 * 1000);
+    const timeZone = String(values.timeZone || 'Asia/Tokyo').trim() || 'Asia/Tokyo';
+
+    if (!this.isValidDate(startAt) || !this.isValidDate(endAt)) {
+      ctx.throw(400, '開始日時または終了日時が不正です');
+    }
+    if (endAt.getTime() <= startAt.getTime()) {
+      ctx.throw(400, '終了日時は開始日時より後にしてください');
+    }
+
+    const title =
+      String(values.title || '').trim() ||
+      `BizBlock PoC Schedule ${new Date().toLocaleString('ja-JP', { hour12: false, timeZone })}`;
+
+    return {
+      title,
+      description:
+        String(values.description || '').trim() || 'Created from NocoBase BizBlock Google Calendar Sync PoC.',
+      startAt,
+      endAt,
+      timeZone,
+      location: String(values.location || '').trim(),
+      isAllDay: false,
+    };
+  }
+
+  private async createGoogleCalendarEvent(
+    accessToken: string,
+    calendarId: string,
+    schedule: {
+      title: string;
+      description?: string;
+      startAt: Date;
+      endAt: Date;
+      timeZone: string;
+      location?: string;
+    },
+  ): Promise<GoogleCalendarEvent> {
+    return this.requestJson<GoogleCalendarEvent>(
+      `${GOOGLE_CALENDAR_EVENTS_BASE_URL}/${encodeURIComponent(calendarId)}/events`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          summary: schedule.title,
+          description: schedule.description || '',
+          location: schedule.location || '',
+          start: {
+            dateTime: schedule.startAt.toISOString(),
+            timeZone: schedule.timeZone,
+          },
+          end: {
+            dateTime: schedule.endAt.toISOString(),
+            timeZone: schedule.timeZone,
+          },
+        }),
+      },
+      'Google Calendar event insert failed',
+    );
+  }
+
   private async saveToken(
     ctx,
     params: {
@@ -433,6 +636,10 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
 
   private getTokenExpiry(expiresIn?: number) {
     return new Date(Date.now() + Math.max(Number(expiresIn || 3600) - 60, 60) * 1000);
+  }
+
+  private isValidDate(value: Date) {
+    return value instanceof Date && !Number.isNaN(value.getTime());
   }
 
   private async requestJson<T>(url: string, init: RequestInit, errorPrefix: string): Promise<T> {
