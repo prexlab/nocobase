@@ -23,6 +23,12 @@ const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
 ];
 
+const RESOURCE_NAME = 'googleCalendarSync';
+const SETTINGS_COLLECTION = 'googleCalendarSyncSettings';
+const STATES_COLLECTION = 'googleCalendarSyncStates';
+const TOKENS_COLLECTION = 'googleCalendarSyncTokens';
+const SCHEDULES_COLLECTION = 'googleCalendarSyncSchedules';
+
 type GoogleCalendarSummary = {
   id: string;
   summary: string;
@@ -39,50 +45,76 @@ type GoogleCalendarEvent = {
   updated?: string;
 };
 
+type GoogleCalendarListEvent = GoogleCalendarEvent & {
+  summary?: string;
+  description?: string;
+  location?: string;
+  start?: {
+    date?: string;
+    dateTime?: string;
+    timeZone?: string;
+  };
+  end?: {
+    date?: string;
+    dateTime?: string;
+    timeZone?: string;
+  };
+};
+
 export class BizBlockGoogleCalendarSyncServer extends Plugin {
   async load() {
-    this.app.resourceManager.define({
-      name: 'googleCalendarPoc',
-      actions: {
-        getSettings: this.getSettings,
-        setSettings: this.setSettings,
-        authorize: this.authorize,
-        callback: this.callback,
-        status: this.status,
-        listCalendars: this.listCalendars,
-        listSchedules: this.listSchedules,
-        createSampleSchedule: this.createSampleSchedule,
-        disconnect: this.disconnect,
-      },
-    });
+    const actions = {
+      getSettings: this.getSettings,
+      setSettings: this.setSettings,
+      authorize: this.authorize,
+      callback: this.callback,
+      status: this.status,
+      listCalendars: this.listCalendars,
+      listUsers: this.listUsers,
+      listSchedules: this.listSchedules,
+      createSchedule: this.createSchedule,
+      updateSchedule: this.updateSchedule,
+      deleteSchedule: this.deleteSchedule,
+      syncFromGoogle: this.syncFromGoogle,
+      disconnect: this.disconnect,
+    };
+    const loggedInActions = [
+      'getSettings',
+      'setSettings',
+      'authorize',
+      'status',
+      'listCalendars',
+      'listUsers',
+      'listSchedules',
+      'createSchedule',
+      'updateSchedule',
+      'deleteSchedule',
+      'syncFromGoogle',
+      'disconnect',
+    ];
 
-    this.app.acl.allow(
-      'googleCalendarPoc',
-      [
-        'getSettings',
-        'setSettings',
-        'authorize',
-        'status',
-        'listCalendars',
-        'listSchedules',
-        'createSampleSchedule',
-        'disconnect',
-      ],
-      'loggedIn',
-    );
-    this.app.acl.allow('googleCalendarPoc', 'callback', 'public');
+    this.app.resourceManager.define({
+      name: RESOURCE_NAME,
+      actions,
+    });
+    this.app.acl.allow(RESOURCE_NAME, loggedInActions, 'loggedIn');
+    this.app.acl.allow(RESOURCE_NAME, 'callback', 'public');
+
     this.app.acl.registerSnippet({
-      name: `pm.${this.name}.google-calendar-poc`,
-      actions: ['googleCalendarPoc:*'],
+      name: `pm.${this.name}.google-calendar-sync`,
+      actions: [`${RESOURCE_NAME}:*`],
     });
   }
 
   getSettings = async (ctx, next) => {
     const settings = await this.readSettings();
+    const defaultRedirectUri = this.getDefaultRedirectUri(ctx);
+    const redirectUri = settings.redirectUri || defaultRedirectUri;
+
     ctx.body = {
       clientId: settings.clientId || '',
-      redirectUri: settings.redirectUri || '',
-      defaultRedirectUri: this.getDefaultRedirectUri(ctx),
+      redirectUri,
+      defaultRedirectUri,
       hasClientSecret: Boolean(settings.clientSecret),
       scopes: GOOGLE_SCOPES,
     };
@@ -90,7 +122,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   };
 
   setSettings = async (ctx, next) => {
-    const repo = ctx.db.getRepository('googleCalendarPocSettings');
+    const repo = ctx.db.getRepository(SETTINGS_COLLECTION);
     const existing = await repo.findOne();
     const values = ctx.action?.params?.values || {};
     const current = this.recordToJSON(existing);
@@ -121,7 +153,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     const state = crypto.randomBytes(24).toString('hex');
     const redirectUri = settings.redirectUri || this.getDefaultRedirectUri(ctx);
 
-    await ctx.db.getRepository('googleCalendarPocStates').create({
+    await ctx.db.getRepository(STATES_COLLECTION).create({
       values: {
         state,
         userId,
@@ -166,7 +198,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
         ctx.throw(400, 'code と state が必要です');
       }
 
-      const stateRepo = ctx.db.getRepository('googleCalendarPocStates');
+      const stateRepo = ctx.db.getRepository(STATES_COLLECTION);
       const stateRecord = await stateRepo.findOne({ filter: { state } });
       const stateData = this.recordToJSON(stateRecord);
 
@@ -202,7 +234,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.app.logger?.warn?.(`[googleCalendarPoc] OAuth callback failed: ${message}`);
+      this.app.logger?.warn?.(`[googleCalendarSync] OAuth callback failed: ${message}`);
       ctx.body = this.renderCallbackHtml('Google カレンダー連携に失敗しました', message);
     }
 
@@ -212,7 +244,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   status = async (ctx, next) => {
     const userId = this.getCurrentUserId(ctx);
     const settings = await this.readSettings();
-    const tokenRecord = await ctx.db.getRepository('googleCalendarPocTokens').findOne({ filter: { userId } });
+    const tokenRecord = await ctx.db.getRepository(TOKENS_COLLECTION).findOne({ filter: { userId } });
     const token = this.recordToJSON(tokenRecord);
 
     ctx.body = {
@@ -232,7 +264,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   listCalendars = async (ctx, next) => {
     const userId = this.getCurrentUserId(ctx);
     const settings = await this.requireSettings(ctx);
-    const tokenRepo = ctx.db.getRepository('googleCalendarPocTokens');
+    const tokenRepo = ctx.db.getRepository(TOKENS_COLLECTION);
     const tokenRecord = await tokenRepo.findOne({ filter: { userId } });
 
     if (!tokenRecord || !this.getValue(tokenRecord, 'refreshToken')) {
@@ -262,34 +294,53 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   };
 
   listSchedules = async (ctx, next) => {
-    const userId = this.getCurrentUserId(ctx);
-    const schedules = await ctx.db.getRepository('googleCalendarPocSchedules').find({
-      filter: { userId },
-      sort: ['-createdAt'],
-      limit: 20,
+    const values = this.getActionValues(ctx);
+    const targetUserId = this.getOptionalUserId(values.userId);
+    const range = this.getDateRange(values);
+    const scheduleRecords = await ctx.db.getRepository(SCHEDULES_COLLECTION).find({
+      filter: targetUserId ? { userId: targetUserId } : {},
+      sort: ['startAt'],
+      limit: 500,
     });
+    const schedules = scheduleRecords
+      .map((schedule) => this.recordToJSON(schedule))
+      .filter((schedule) => !schedule?.isDeleted)
+      .filter((schedule) => this.isScheduleInRange(schedule, range.startAt, range.endAt));
 
     ctx.body = {
-      schedules: schedules.map((schedule) => this.recordToJSON(schedule)),
+      schedules: await this.enrichSchedules(ctx, schedules),
     };
     await next();
   };
 
-  createSampleSchedule = async (ctx, next) => {
-    const userId = this.getCurrentUserId(ctx);
+  listUsers = async (ctx, next) => {
+    const users = await this.listUserSummaries(ctx);
+    const tokensByUserId = await this.getTokensByUserId(ctx);
+
+    ctx.body = {
+      users: users.map((user) => {
+        const token = tokensByUserId.get(String(user.id));
+        return {
+          ...user,
+          connected: Boolean(token?.isActive && token?.refreshToken),
+          googleAccountEmail: token?.googleAccountEmail || '',
+          selectedCalendarId: token?.selectedCalendarId || '',
+        };
+      }),
+    };
+    await next();
+  };
+
+  createSchedule = async (ctx, next) => {
+    const values = this.getActionValues(ctx);
+    const userId = this.normalizeUserId(values.userId || this.getCurrentUserId(ctx));
+    const scheduleValues = this.buildScheduleValues(ctx, values);
+    const tokenRecord = await this.requireTokenForUser(ctx, userId);
     const settings = await this.requireSettings(ctx);
-    const tokenRepo = ctx.db.getRepository('googleCalendarPocTokens');
-    const tokenRecord = await tokenRepo.findOne({ filter: { userId } });
-
-    if (!tokenRecord || !this.getValue(tokenRecord, 'refreshToken')) {
-      ctx.throw(400, 'Google 認証がまだ完了していません');
-    }
-
     const accessToken = await this.ensureAccessToken(ctx, tokenRecord, settings);
+    const tokenRepo = ctx.db.getRepository(TOKENS_COLLECTION);
     const primaryCalendar = await this.ensurePrimaryCalendar(ctx, tokenRepo, tokenRecord, accessToken);
-    const values = ctx.action?.params?.values || {};
-    const scheduleValues = this.buildSampleScheduleValues(ctx, values);
-    const scheduleRepo = ctx.db.getRepository('googleCalendarPocSchedules');
+    const scheduleRepo = ctx.db.getRepository(SCHEDULES_COLLECTION);
     const scheduleRecord = await scheduleRepo.create({
       values: {
         ...scheduleValues,
@@ -297,64 +348,190 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
         googleCalendarId: primaryCalendar.id,
         syncStatus: 'pending',
         syncSource: 'bizblock',
+        isDeleted: false,
       },
     });
 
     try {
       const event = await this.createGoogleCalendarEvent(accessToken, primaryCalendar.id, scheduleValues);
-      if (!event.id) {
-        ctx.throw(502, 'Google Calendar event id を取得できませんでした');
-      }
-
-      await scheduleRepo.update({
-        filter: { id: this.getValue(scheduleRecord, 'id') },
-        values: {
-          googleCalendarId: primaryCalendar.id,
-          googleEventId: event.id,
-          googleEventEtag: event.etag || '',
-          googleHtmlLink: event.htmlLink || '',
-          syncStatus: 'synced',
-          syncSource: 'bizblock',
-          lastSyncedAt: new Date(),
-          lastError: '',
-        },
-      });
-
+      await this.updateScheduleWithGoogleEvent(ctx, scheduleRecord, primaryCalendar.id, event, 'bizblock');
       const syncedSchedule = await scheduleRepo.findOne({ filter: { id: this.getValue(scheduleRecord, 'id') } });
-      ctx.body = {
-        schedule: this.recordToJSON(syncedSchedule),
-        event: {
-          id: event.id,
-          etag: event.etag || '',
-          htmlLink: event.htmlLink || '',
-          status: event.status || '',
-          updated: event.updated || '',
-        },
-      };
+      ctx.body = { schedule: (await this.enrichSchedules(ctx, [this.recordToJSON(syncedSchedule)]))[0] };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await scheduleRepo.update({
-        filter: { id: this.getValue(scheduleRecord, 'id') },
-        values: {
-          syncStatus: 'error',
-          lastError: message,
-        },
-      });
+      await this.markScheduleSyncError(ctx, scheduleRecord, error);
       throw error;
     }
 
     await next();
   };
 
+  updateSchedule = async (ctx, next) => {
+    const params = this.getActionValues(ctx);
+    const values = params.values || params;
+    const scheduleId = params.id || values.id;
+    if (!scheduleId) {
+      ctx.throw(400, 'schedule id が必要です');
+    }
+
+    const scheduleRepo = ctx.db.getRepository(SCHEDULES_COLLECTION);
+    const scheduleRecord = await scheduleRepo.findOne({ filter: { id: scheduleId } });
+    const current = this.recordToJSON(scheduleRecord);
+    if (!current || current.isDeleted) {
+      ctx.throw(404, '予定が見つかりません');
+    }
+    if (values.userId && String(values.userId) !== String(current.userId)) {
+      ctx.throw(400, '予定のユーザー変更は未対応です');
+    }
+
+    const scheduleValues = this.buildScheduleValues(ctx, values, current);
+    await scheduleRepo.update({
+      filter: { id: scheduleId },
+      values: {
+        ...scheduleValues,
+        syncStatus: 'pending',
+        syncSource: 'bizblock',
+        lastError: '',
+      },
+    });
+
+    const tokenRecord = await this.requireTokenForUser(ctx, current.userId);
+    const settings = await this.requireSettings(ctx);
+    const accessToken = await this.ensureAccessToken(ctx, tokenRecord, settings);
+    const tokenRepo = ctx.db.getRepository(TOKENS_COLLECTION);
+    const primaryCalendar = await this.ensurePrimaryCalendar(ctx, tokenRepo, tokenRecord, accessToken);
+    const calendarId = current.googleCalendarId || primaryCalendar.id;
+
+    try {
+      const event = current.googleEventId
+        ? await this.updateGoogleCalendarEvent(accessToken, calendarId, current.googleEventId, scheduleValues)
+        : await this.createGoogleCalendarEvent(accessToken, primaryCalendar.id, scheduleValues);
+      await this.updateScheduleWithGoogleEvent(
+        ctx,
+        scheduleRecord,
+        current.googleEventId ? calendarId : primaryCalendar.id,
+        event,
+        'bizblock',
+      );
+      const syncedSchedule = await scheduleRepo.findOne({ filter: { id: scheduleId } });
+      ctx.body = { schedule: (await this.enrichSchedules(ctx, [this.recordToJSON(syncedSchedule)]))[0] };
+    } catch (error) {
+      await this.markScheduleSyncError(ctx, scheduleRecord, error);
+      throw error;
+    }
+
+    await next();
+  };
+
+  deleteSchedule = async (ctx, next) => {
+    const values = this.getActionValues(ctx);
+    const scheduleId = values.id;
+    if (!scheduleId) {
+      ctx.throw(400, 'schedule id が必要です');
+    }
+
+    const scheduleRepo = ctx.db.getRepository(SCHEDULES_COLLECTION);
+    const scheduleRecord = await scheduleRepo.findOne({ filter: { id: scheduleId } });
+    const schedule = this.recordToJSON(scheduleRecord);
+    if (!schedule || schedule.isDeleted) {
+      ctx.throw(404, '予定が見つかりません');
+    }
+
+    const tokenRecord = await this.requireTokenForUser(ctx, schedule.userId);
+    const settings = await this.requireSettings(ctx);
+    const accessToken = await this.ensureAccessToken(ctx, tokenRecord, settings);
+
+    try {
+      if (schedule.googleCalendarId && schedule.googleEventId) {
+        await this.deleteGoogleCalendarEvent(accessToken, schedule.googleCalendarId, schedule.googleEventId);
+      }
+      await scheduleRepo.update({
+        filter: { id: scheduleId },
+        values: {
+          isDeleted: true,
+          deletedAt: new Date(),
+          syncStatus: 'deleted',
+          syncSource: 'bizblock',
+          lastSyncedAt: new Date(),
+          lastError: '',
+        },
+      });
+      ctx.body = { ok: true };
+    } catch (error) {
+      await this.markScheduleSyncError(ctx, scheduleRecord, error);
+      throw error;
+    }
+
+    await next();
+  };
+
+  syncFromGoogle = async (ctx, next) => {
+    const values = this.getActionValues(ctx);
+    const targetUserId = this.getOptionalUserId(values.userId);
+    const range = this.getDateRange(values);
+    const tokenRecords = await this.getSyncTokenRecords(ctx, targetUserId);
+    const settings = await this.requireSettings(ctx);
+    const tokenRepo = ctx.db.getRepository(TOKENS_COLLECTION);
+    const result = {
+      users: tokenRecords.length,
+      fetched: 0,
+      created: 0,
+      updated: 0,
+      deleted: 0,
+      skipped: 0,
+      errors: [] as { userId: string | number; message: string }[],
+    };
+
+    if (!tokenRecords.length) {
+      ctx.throw(400, 'Google連携済みユーザーが見つかりません');
+    }
+
+    for (const tokenRecord of tokenRecords) {
+      const userId = this.getValue(tokenRecord, 'userId');
+      try {
+        const accessToken = await this.ensureAccessToken(ctx, tokenRecord, settings);
+        const primaryCalendar = await this.ensurePrimaryCalendar(ctx, tokenRepo, tokenRecord, accessToken);
+        const events = await this.fetchGoogleCalendarEvents(
+          accessToken,
+          primaryCalendar.id,
+          range.startAt,
+          range.endAt,
+        );
+        result.fetched += events.length;
+
+        for (const event of events) {
+          const eventResult = await this.upsertScheduleFromGoogleEvent(ctx, userId, primaryCalendar, event);
+          result[eventResult] += 1;
+        }
+
+        await tokenRepo.update({
+          filter: { id: this.getValue(tokenRecord, 'id') },
+          values: {
+            lastFetchedAt: new Date(),
+            selectedCalendarId: primaryCalendar.id,
+            isActive: true,
+          },
+        });
+      } catch (error) {
+        result.errors.push({
+          userId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    ctx.body = result;
+    await next();
+  };
+
   disconnect = async (ctx, next) => {
     const userId = this.getCurrentUserId(ctx);
-    await ctx.db.getRepository('googleCalendarPocTokens').destroy({ filter: { userId } });
+    await ctx.db.getRepository(TOKENS_COLLECTION).destroy({ filter: { userId } });
     ctx.body = { ok: true };
     await next();
   };
 
   private async readSettings() {
-    const record = await this.db.getRepository('googleCalendarPocSettings').findOne();
+    const record = await this.db.getRepository(SETTINGS_COLLECTION).findOne();
     return this.recordToJSON(record) || {};
   }
 
@@ -374,12 +551,147 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     return userId;
   }
 
+  private getActionValues(ctx) {
+    return ctx.action?.params?.values || {};
+  }
+
+  private normalizeUserId(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : value;
+  }
+
+  private getOptionalUserId(value) {
+    if (!value || value === 'all') {
+      return null;
+    }
+    return this.normalizeUserId(value);
+  }
+
+  private getDateRange(values) {
+    const fallbackStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const fallbackEnd = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+    const startAt = values.startAt ? new Date(values.startAt) : fallbackStart;
+    const endAt = values.endAt ? new Date(values.endAt) : fallbackEnd;
+
+    return {
+      startAt: this.isValidDate(startAt) ? startAt : fallbackStart,
+      endAt: this.isValidDate(endAt) ? endAt : fallbackEnd,
+    };
+  }
+
+  private isScheduleInRange(schedule, startAt: Date, endAt: Date) {
+    const scheduleStart = new Date(schedule.startAt);
+    const scheduleEnd = new Date(schedule.endAt);
+    if (!this.isValidDate(scheduleStart) || !this.isValidDate(scheduleEnd)) {
+      return false;
+    }
+    return scheduleStart.getTime() <= endAt.getTime() && scheduleEnd.getTime() >= startAt.getTime();
+  }
+
+  private async listUserSummaries(ctx) {
+    const users = await ctx.db.getRepository('users').find({
+      fields: ['id', 'nickname', 'username', 'email'],
+      sort: ['id'],
+      limit: 500,
+    });
+
+    return users.map((user) => {
+      const data = this.recordToJSON(user);
+      return {
+        id: data.id,
+        nickname: data.nickname || '',
+        username: data.username || '',
+        email: data.email || '',
+        displayName: data.nickname || data.username || data.email || `User #${data.id}`,
+      };
+    });
+  }
+
+  private async getTokensByUserId(ctx) {
+    const tokens = await ctx.db.getRepository(TOKENS_COLLECTION).find({
+      sort: ['userId'],
+      limit: 500,
+    });
+    const entries: [string, any][] = tokens.map((token) => {
+      const data = this.recordToJSON(token);
+      return [String(data.userId), data];
+    });
+    return new Map<string, any>(entries);
+  }
+
+  private async enrichSchedules(ctx, schedules) {
+    const users = await this.listUserSummaries(ctx);
+    const usersById = new Map(users.map((user) => [String(user.id), user]));
+    const tokensByUserId = await this.getTokensByUserId(ctx);
+
+    return schedules.map((schedule) => {
+      const user = usersById.get(String(schedule.userId));
+      const token = tokensByUserId.get(String(schedule.userId));
+      return {
+        ...schedule,
+        user: user || {
+          id: schedule.userId,
+          displayName: `User #${schedule.userId}`,
+        },
+        googleAccountEmail: token?.googleAccountEmail || '',
+      };
+    });
+  }
+
+  private async requireTokenForUser(ctx, userId) {
+    const tokenRecord = await ctx.db.getRepository(TOKENS_COLLECTION).findOne({ filter: { userId } });
+    if (!tokenRecord || !this.getValue(tokenRecord, 'refreshToken')) {
+      ctx.throw(400, `ユーザー ${userId} のGoogle認証がまだ完了していません`);
+    }
+    return tokenRecord;
+  }
+
+  private async getSyncTokenRecords(ctx, userId = null) {
+    const tokenRecords = await ctx.db.getRepository(TOKENS_COLLECTION).find({
+      filter: userId ? { userId } : {},
+      sort: ['userId'],
+      limit: 500,
+    });
+
+    return tokenRecords.filter((tokenRecord) => {
+      const token = this.recordToJSON(tokenRecord);
+      return token?.isActive && token?.refreshToken;
+    });
+  }
+
+  private buildScheduleValues(ctx, values, current: any = {}) {
+    const startAt = values.startAt !== undefined ? new Date(values.startAt) : new Date(current.startAt);
+    const endAt = values.endAt !== undefined ? new Date(values.endAt) : new Date(current.endAt);
+    const title = String(values.title ?? current.title ?? '').trim();
+    const timeZone = String(values.timeZone ?? current.timeZone ?? 'Asia/Tokyo').trim() || 'Asia/Tokyo';
+
+    if (!title) {
+      ctx.throw(400, '予定タイトルを入力してください');
+    }
+    if (!this.isValidDate(startAt) || !this.isValidDate(endAt)) {
+      ctx.throw(400, '開始日時または終了日時が不正です');
+    }
+    if (endAt.getTime() <= startAt.getTime()) {
+      ctx.throw(400, '終了日時は開始日時より後にしてください');
+    }
+
+    return {
+      title,
+      description: String(values.description ?? current.description ?? '').trim(),
+      startAt,
+      endAt,
+      timeZone,
+      location: String(values.location ?? current.location ?? '').trim(),
+      isAllDay: Boolean(values.isAllDay ?? current.isAllDay ?? false),
+    };
+  }
+
   private getDefaultRedirectUri(ctx) {
     const headerHost = ctx.get?.('x-forwarded-host') || ctx.get?.('host') || ctx.request?.headers?.host;
     const headerProto = ctx.get?.('x-forwarded-proto') || ctx.protocol || ctx.request?.protocol || 'http';
     const origin =
       ctx.origin && ctx.origin !== 'null' ? ctx.origin : `${headerProto}://${headerHost || '127.0.0.1:13000'}`;
-    return `${origin}/api/googleCalendarPoc:callback`;
+    return `${origin}/api/${RESOURCE_NAME}:callback`;
   }
 
   private async exchangeAuthorizationCode(params: {
@@ -444,7 +756,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       'Google token refresh failed',
     );
 
-    await ctx.db.getRepository('googleCalendarPocTokens').update({
+    await ctx.db.getRepository(TOKENS_COLLECTION).update({
       filter: { id: this.getValue(tokenRecord, 'id') },
       values: {
         accessToken: refreshed.access_token,
@@ -469,7 +781,9 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       );
       return data.email || '';
     } catch (error) {
-      this.app.logger?.warn?.(`[googleCalendarPoc] userinfo failed: ${error instanceof Error ? error.message : error}`);
+      this.app.logger?.warn?.(
+        `[googleCalendarSync] userinfo failed: ${error instanceof Error ? error.message : error}`,
+      );
       return '';
     }
   }
@@ -525,34 +839,6 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     return primaryCalendar;
   }
 
-  private buildSampleScheduleValues(ctx, values) {
-    const startAt = values.startAt ? new Date(values.startAt) : new Date(Date.now() + 60 * 60 * 1000);
-    const endAt = values.endAt ? new Date(values.endAt) : new Date(startAt.getTime() + 30 * 60 * 1000);
-    const timeZone = String(values.timeZone || 'Asia/Tokyo').trim() || 'Asia/Tokyo';
-
-    if (!this.isValidDate(startAt) || !this.isValidDate(endAt)) {
-      ctx.throw(400, '開始日時または終了日時が不正です');
-    }
-    if (endAt.getTime() <= startAt.getTime()) {
-      ctx.throw(400, '終了日時は開始日時より後にしてください');
-    }
-
-    const title =
-      String(values.title || '').trim() ||
-      `BizBlock PoC Schedule ${new Date().toLocaleString('ja-JP', { hour12: false, timeZone })}`;
-
-    return {
-      title,
-      description:
-        String(values.description || '').trim() || 'Created from NocoBase BizBlock Google Calendar Sync PoC.',
-      startAt,
-      endAt,
-      timeZone,
-      location: String(values.location || '').trim(),
-      isAllDay: false,
-    };
-  }
-
   private async createGoogleCalendarEvent(
     accessToken: string,
     calendarId: string,
@@ -591,6 +877,239 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     );
   }
 
+  private async updateGoogleCalendarEvent(
+    accessToken: string,
+    calendarId: string,
+    eventId: string,
+    schedule: {
+      title: string;
+      description?: string;
+      startAt: Date;
+      endAt: Date;
+      timeZone: string;
+      location?: string;
+    },
+  ): Promise<GoogleCalendarEvent> {
+    return this.requestJson<GoogleCalendarEvent>(
+      `${GOOGLE_CALENDAR_EVENTS_BASE_URL}/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          summary: schedule.title,
+          description: schedule.description || '',
+          location: schedule.location || '',
+          start: {
+            dateTime: schedule.startAt.toISOString(),
+            timeZone: schedule.timeZone,
+          },
+          end: {
+            dateTime: schedule.endAt.toISOString(),
+            timeZone: schedule.timeZone,
+          },
+        }),
+      },
+      'Google Calendar event update failed',
+    );
+  }
+
+  private async deleteGoogleCalendarEvent(accessToken: string, calendarId: string, eventId: string) {
+    const response = await fetch(
+      `${GOOGLE_CALENDAR_EVENTS_BASE_URL}/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    );
+
+    if (response.ok || response.status === 404 || response.status === 410) {
+      return;
+    }
+
+    const text = await response.text();
+    const data = text ? this.safeJsonParse(text) : {};
+    const message = data?.error?.message || data?.error || text || `${response.status} ${response.statusText}`;
+    throw new Error(`Google Calendar event delete failed: ${message}`);
+  }
+
+  private async fetchGoogleCalendarEvents(
+    accessToken: string,
+    calendarId: string,
+    startAt: Date,
+    endAt: Date,
+  ): Promise<GoogleCalendarListEvent[]> {
+    const events: GoogleCalendarListEvent[] = [];
+    let pageToken = '';
+
+    do {
+      const url = new URL(`${GOOGLE_CALENDAR_EVENTS_BASE_URL}/${encodeURIComponent(calendarId)}/events`);
+      url.searchParams.set('singleEvents', 'true');
+      url.searchParams.set('showDeleted', 'true');
+      url.searchParams.set('maxResults', '2500');
+      url.searchParams.set('timeMin', startAt.toISOString());
+      url.searchParams.set('timeMax', endAt.toISOString());
+      if (pageToken) {
+        url.searchParams.set('pageToken', pageToken);
+      }
+
+      const data = await this.requestJson<{ items?: GoogleCalendarListEvent[]; nextPageToken?: string }>(
+        url.toString(),
+        {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${accessToken}` },
+        },
+        'Google Calendar events list failed',
+      );
+
+      events.push(...(data.items || []));
+      pageToken = data.nextPageToken || '';
+    } while (pageToken && events.length < 10000);
+
+    return events;
+  }
+
+  private async updateScheduleWithGoogleEvent(
+    ctx,
+    scheduleRecord,
+    calendarId: string,
+    event: GoogleCalendarEvent,
+    source: string,
+  ) {
+    if (!event.id) {
+      ctx.throw(502, 'Google Calendar event id を取得できませんでした');
+    }
+
+    await ctx.db.getRepository(SCHEDULES_COLLECTION).update({
+      filter: { id: this.getValue(scheduleRecord, 'id') },
+      values: {
+        googleCalendarId: calendarId,
+        googleEventId: event.id,
+        googleEventEtag: event.etag || '',
+        googleUpdatedAt: event.updated ? new Date(event.updated) : null,
+        googleHtmlLink: event.htmlLink || '',
+        syncStatus: 'synced',
+        syncSource: source,
+        isDeleted: false,
+        deletedAt: null,
+        lastSyncedAt: new Date(),
+        lastError: '',
+      },
+    });
+  }
+
+  private async markScheduleSyncError(ctx, scheduleRecord, error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await ctx.db.getRepository(SCHEDULES_COLLECTION).update({
+      filter: { id: this.getValue(scheduleRecord, 'id') },
+      values: {
+        syncStatus: 'error',
+        lastError: message,
+      },
+    });
+  }
+
+  private async upsertScheduleFromGoogleEvent(
+    ctx,
+    userId: number | string,
+    calendar: GoogleCalendarSummary,
+    event: GoogleCalendarListEvent,
+  ): Promise<'created' | 'updated' | 'deleted' | 'skipped'> {
+    if (!event.id) {
+      return 'skipped';
+    }
+
+    const scheduleRepo = ctx.db.getRepository(SCHEDULES_COLLECTION);
+    const existing = await scheduleRepo.findOne({ filter: { userId, googleEventId: event.id } });
+    const existingData = this.recordToJSON(existing);
+
+    if (event.status === 'cancelled') {
+      if (!existing) {
+        return 'skipped';
+      }
+      await scheduleRepo.update({
+        filter: { id: existingData.id },
+        values: {
+          isDeleted: true,
+          deletedAt: new Date(),
+          syncStatus: 'deleted',
+          syncSource: 'google',
+          googleUpdatedAt: event.updated ? new Date(event.updated) : existingData.googleUpdatedAt,
+          lastSyncedAt: new Date(),
+          lastError: '',
+        },
+      });
+      return 'deleted';
+    }
+
+    const scheduleValues = this.googleEventToScheduleValues(event, calendar.timeZone || 'Asia/Tokyo');
+    if (!scheduleValues) {
+      return 'skipped';
+    }
+
+    const values = {
+      ...scheduleValues,
+      userId,
+      googleCalendarId: calendar.id,
+      googleEventId: event.id,
+      googleEventEtag: event.etag || '',
+      googleUpdatedAt: event.updated ? new Date(event.updated) : null,
+      googleHtmlLink: event.htmlLink || '',
+      syncStatus: 'synced',
+      syncSource: 'google',
+      isDeleted: false,
+      deletedAt: null,
+      lastSyncedAt: new Date(),
+      lastError: '',
+    };
+
+    if (existing) {
+      await scheduleRepo.update({ filter: { id: existingData.id }, values });
+      return 'updated';
+    }
+
+    await scheduleRepo.create({ values });
+    return 'created';
+  }
+
+  private googleEventToScheduleValues(event: GoogleCalendarListEvent, fallbackTimeZone: string) {
+    const isAllDay = Boolean(event.start?.date);
+    const timeZone = event.start?.timeZone || event.end?.timeZone || fallbackTimeZone || 'Asia/Tokyo';
+    const startAt = this.parseGoogleEventDate(event.start, timeZone);
+    const endAt = this.parseGoogleEventDate(event.end, timeZone);
+
+    if (!startAt || !endAt || endAt.getTime() <= startAt.getTime()) {
+      return null;
+    }
+
+    return {
+      title: String(event.summary || '(無題)').trim(),
+      description: String(event.description || '').trim(),
+      startAt,
+      endAt,
+      timeZone,
+      location: String(event.location || '').trim(),
+      isAllDay,
+    };
+  }
+
+  private parseGoogleEventDate(value, timeZone: string) {
+    if (!value) {
+      return null;
+    }
+    if (value.dateTime) {
+      const date = new Date(value.dateTime);
+      return this.isValidDate(date) ? date : null;
+    }
+    if (value.date) {
+      const date = new Date(`${value.date}T00:00:00${timeZone === 'Asia/Tokyo' ? '+09:00' : ''}`);
+      return this.isValidDate(date) ? date : null;
+    }
+    return null;
+  }
+
   private async saveToken(
     ctx,
     params: {
@@ -605,7 +1124,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       calendars: GoogleCalendarSummary[];
     },
   ) {
-    const repo = ctx.db.getRepository('googleCalendarPocTokens');
+    const repo = ctx.db.getRepository(TOKENS_COLLECTION);
     const existing = await repo.findOne({ filter: { userId: params.userId } });
     const existingJson = this.recordToJSON(existing);
     const selectedCalendarId =
@@ -699,7 +1218,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     <main>
       <h1>${safeTitle}</h1>
       <p>${safeDetail}</p>
-      <p>NocoBase の Google Calendar PoC 設定画面に戻り、カレンダー一覧を更新してください。</p>
+      <p>NocoBase の Google Calendar Sync 設定画面に戻り、カレンダー一覧を更新してください。</p>
     </main>
   </body>
 </html>`;

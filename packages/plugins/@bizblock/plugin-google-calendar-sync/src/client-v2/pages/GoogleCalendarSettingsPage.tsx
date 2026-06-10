@@ -7,11 +7,11 @@
  * For more information, please refer to: https://www.nocobase.com/agreement.
  */
 
-import { useAPIClient } from '@nocobase/client';
+import { useFlowContext } from '@nocobase/flow-engine';
 import React from 'react';
-import GoogleCalendarPocPage from '../../common/GoogleCalendarPocPage';
+import GoogleCalendarSettingsPage from '../../common/GoogleCalendarSettingsPage';
 
-export default function GoogleCalendarPocClientPage() {
-  const api = useAPIClient();
-  return <GoogleCalendarPocPage api={api} />;
+export default function GoogleCalendarSettingsClientV2Page() {
+  const ctx = useFlowContext();
+  return <GoogleCalendarSettingsPage api={ctx.api} />;
 }

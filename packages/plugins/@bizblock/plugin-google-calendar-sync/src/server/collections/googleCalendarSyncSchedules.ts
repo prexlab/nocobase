@@ -10,7 +10,8 @@
 import { defineCollection } from '@nocobase/database';
 
 export default defineCollection({
-  name: 'googleCalendarPocSchedules',
+  name: 'googleCalendarSyncSchedules',
+  tableName: 'googleCalendarSyncSchedules',
   timestamps: true,
   fields: [
     {
@@ -75,6 +76,11 @@ export default defineCollection({
       interface: 'input',
     },
     {
+      name: 'googleUpdatedAt',
+      type: 'datetime',
+      interface: 'datetime',
+    },
+    {
       name: 'googleHtmlLink',
       type: 'text',
       interface: 'textarea',
@@ -93,6 +99,17 @@ export default defineCollection({
     },
     {
       name: 'lastSyncedAt',
+      type: 'datetime',
+      interface: 'datetime',
+    },
+    {
+      name: 'isDeleted',
+      type: 'boolean',
+      interface: 'boolean',
+      defaultValue: false,
+    },
+    {
+      name: 'deletedAt',
       type: 'datetime',
       interface: 'datetime',
     },

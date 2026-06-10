@@ -2,7 +2,7 @@
   "private": true,
   "name": "@bizblock/plugin-google-calendar-sync",
   "displayName": "BizBlock Google Calendar Sync",
-  "description": "PoC plugin for Google OAuth and Google Calendar list retrieval.",
+  "description": "Google OAuth and Google Calendar schedule synchronization for BizBlock.",
   "version": "0.1.0",
   "main": "dist/server/index.js",
   "peerDependencies": {

@@ -8,14 +8,20 @@
  */
 
 import { Plugin } from '@nocobase/client';
-import GoogleCalendarPocPage from './pages/GoogleCalendarPocPage';
+import GoogleCalendarSchedulesPage from './pages/GoogleCalendarSchedulesPage';
+import GoogleCalendarSettingsPage from './pages/GoogleCalendarSettingsPage';
 
 export class BizBlockGoogleCalendarSyncClient extends Plugin {
   async load() {
     this.pluginSettingsManager.add('bizblock-google-calendar', {
-      title: 'Google Calendar PoC',
+      title: 'Google Calendar Sync',
       icon: 'CalendarOutlined',
-      Component: GoogleCalendarPocPage,
+      Component: GoogleCalendarSettingsPage,
+    });
+
+    this.router.add('bizblock-google-calendar-schedules', {
+      path: '/admin/google-calendar/schedules',
+      Component: GoogleCalendarSchedulesPage,
     });
   }
 }

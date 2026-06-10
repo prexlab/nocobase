@@ -8,7 +8,7 @@
  */
 
 import React, { useMemo, useState } from 'react';
-import { Alert, Button, Card, Descriptions, Form, Input, Space, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Descriptions, Form, Input, Space, Table, Typography, message } from 'antd';
 import { useRequest } from 'ahooks';
 
 type ApiClient = {
@@ -29,50 +29,26 @@ type CalendarRow = {
   timeZone?: string;
 };
 
-type ScheduleRow = {
-  id: number | string;
-  title: string;
-  startAt: string;
-  endAt: string;
-  googleCalendarId?: string;
-  googleEventId?: string;
-  googleHtmlLink?: string;
-  syncStatus?: string;
-  lastSyncedAt?: string;
-  lastError?: string;
-};
-
 function unwrap(response: any) {
   return response?.data?.data || response?.data || {};
 }
 
-function formatDateTime(value?: string) {
-  if (!value) {
-    return '-';
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString('ja-JP', { hour12: false });
-}
-
-export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
-  const [form] = Form.useForm<SettingsForm>();
+export function GoogleCalendarSettingsPage({ api }: { api: ApiClient }) {
+  const [settingsForm] = Form.useForm<SettingsForm>();
   const [settingsMeta, setSettingsMeta] = useState<any>({});
   const [authorizing, setAuthorizing] = useState(false);
 
   const settingsRequest = useRequest(
     () =>
       api.request({
-        url: 'googleCalendarPoc:getSettings',
+        url: 'googleCalendarSync:getSettings',
         method: 'get',
       }),
     {
       onSuccess(response) {
         const data = unwrap(response);
         setSettingsMeta(data);
-        form.setFieldsValue({
+        settingsForm.setFieldsValue({
           clientId: data.clientId || '',
           redirectUri: data.redirectUri || data.defaultRedirectUri || '',
         });
@@ -82,7 +58,7 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
 
   const statusRequest = useRequest(() =>
     api.request({
-      url: 'googleCalendarPoc:status',
+      url: 'googleCalendarSync:status',
       method: 'get',
     }),
   );
@@ -90,19 +66,10 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
   const status = unwrap(statusRequest.data);
   const calendars: CalendarRow[] = status.calendars || [];
 
-  const schedulesRequest = useRequest(() =>
-    api.request({
-      url: 'googleCalendarPoc:listSchedules',
-      method: 'get',
-    }),
-  );
-
-  const schedules: ScheduleRow[] = unwrap(schedulesRequest.data).schedules || [];
-
-  const saveRequest = useRequest(
+  const saveSettingsRequest = useRequest(
     (values: SettingsForm) =>
       api.request({
-        url: 'googleCalendarPoc:setSettings',
+        url: 'googleCalendarSync:setSettings',
         method: 'post',
         data: values,
       }),
@@ -122,7 +89,7 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
   const listCalendarsRequest = useRequest(
     () =>
       api.request({
-        url: 'googleCalendarPoc:listCalendars',
+        url: 'googleCalendarSync:listCalendars',
         method: 'post',
       }),
     {
@@ -140,7 +107,7 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
   const disconnectRequest = useRequest(
     () =>
       api.request({
-        url: 'googleCalendarPoc:disconnect',
+        url: 'googleCalendarSync:disconnect',
         method: 'post',
       }),
     {
@@ -148,26 +115,6 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
       onSuccess() {
         message.success('連携を解除しました');
         statusRequest.refresh();
-      },
-    },
-  );
-
-  const createSampleScheduleRequest = useRequest(
-    () =>
-      api.request({
-        url: 'googleCalendarPoc:createSampleSchedule',
-        method: 'post',
-      }),
-    {
-      manual: true,
-      onSuccess() {
-        message.success('サンプル予定をGoogleカレンダーに作成しました');
-        statusRequest.refresh();
-        schedulesRequest.refresh();
-      },
-      onError(error) {
-        message.error(error?.message || 'サンプル予定の作成に失敗しました');
-        schedulesRequest.refresh();
       },
     },
   );
@@ -207,84 +154,22 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
     [],
   );
 
-  const scheduleColumns = useMemo(
-    () => [
-      {
-        title: '予定タイトル',
-        dataIndex: 'title',
-        key: 'title',
-      },
-      {
-        title: '開始',
-        dataIndex: 'startAt',
-        key: 'startAt',
-        width: 180,
-        render: formatDateTime,
-      },
-      {
-        title: '終了',
-        dataIndex: 'endAt',
-        key: 'endAt',
-        width: 180,
-        render: formatDateTime,
-      },
-      {
-        title: '同期状態',
-        dataIndex: 'syncStatus',
-        key: 'syncStatus',
-        width: 120,
-        render: (value: string) => {
-          const color = value === 'synced' ? 'success' : value === 'error' ? 'error' : 'processing';
-          return <Tag color={color}>{value || 'pending'}</Tag>;
-        },
-      },
-      {
-        title: 'Google Event ID',
-        dataIndex: 'googleEventId',
-        key: 'googleEventId',
-        render: (value: string) => (value ? <Typography.Text copyable>{value}</Typography.Text> : '-'),
-      },
-      {
-        title: 'Google',
-        dataIndex: 'googleHtmlLink',
-        key: 'googleHtmlLink',
-        width: 100,
-        render: (value: string) =>
-          value ? (
-            <Typography.Link href={value} target="_blank" rel="noreferrer">
-              開く
-            </Typography.Link>
-          ) : (
-            '-'
-          ),
-      },
-      {
-        title: 'エラー',
-        dataIndex: 'lastError',
-        key: 'lastError',
-        ellipsis: true,
-        render: (value: string) => value || '-',
-      },
-    ],
-    [],
-  );
-
-  const handleSave = async () => {
-    const values = await form.validateFields();
-    saveRequest.run(values);
+  const handleSaveSettings = async () => {
+    const values = await settingsForm.validateFields();
+    saveSettingsRequest.run(values);
   };
 
   const handleAuthorize = async () => {
-    const values = await form.validateFields();
+    const values = await settingsForm.validateFields();
     setAuthorizing(true);
     try {
       await api.request({
-        url: 'googleCalendarPoc:setSettings',
+        url: 'googleCalendarSync:setSettings',
         method: 'post',
         data: values,
       });
       const response = await api.request({
-        url: 'googleCalendarPoc:authorize',
+        url: 'googleCalendarSync:authorize',
         method: 'post',
       });
       const authorizeUrl = unwrap(response).authorizeUrl;
@@ -300,8 +185,12 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card title="Google Calendar PoC" loading={settingsRequest.loading}>
-        <Form form={form} layout="vertical" style={{ maxWidth: 760 }}>
+      <Card
+        title="Google Calendar Sync"
+        loading={settingsRequest.loading}
+        extra={<Typography.Link href="/admin/google-calendar/schedules">スケジュール管理を開く</Typography.Link>}
+      >
+        <Form form={settingsForm} layout="vertical" style={{ maxWidth: 760 }}>
           <Form.Item
             label="OAuth クライアントID"
             name="clientId"
@@ -326,7 +215,7 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
             <Button type="primary" onClick={handleAuthorize} loading={authorizing}>
               Google 認証を開始
             </Button>
-            <Button onClick={handleSave} loading={saveRequest.loading}>
+            <Button onClick={handleSaveSettings} loading={saveSettingsRequest.loading}>
               保存
             </Button>
             <Button
@@ -335,13 +224,6 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
               disabled={!status.connected}
             >
               カレンダー一覧を更新
-            </Button>
-            <Button
-              onClick={() => createSampleScheduleRequest.run()}
-              loading={createSampleScheduleRequest.loading}
-              disabled={!status.connected}
-            >
-              サンプル予定を作成
             </Button>
             <Button danger onClick={() => disconnectRequest.run()} disabled={!status.connected}>
               連携解除
@@ -361,7 +243,7 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
           <Descriptions.Item label="最終取得日時">{status.lastFetchedAt || '-'}</Descriptions.Item>
           <Descriptions.Item label="Callback URL">
             <Typography.Text copyable>
-              {form.getFieldValue('redirectUri') || settingsMeta.defaultRedirectUri}
+              {settingsForm.getFieldValue('redirectUri') || settingsMeta.defaultRedirectUri}
             </Typography.Text>
           </Descriptions.Item>
         </Descriptions>
@@ -377,27 +259,8 @@ export function GoogleCalendarPocPage({ api }: { api: ApiClient }) {
           scroll={{ x: 900 }}
         />
       </Card>
-
-      <Card
-        title="同期済み予定（PoC）"
-        extra={
-          <Button onClick={() => schedulesRequest.refresh()} loading={schedulesRequest.loading}>
-            更新
-          </Button>
-        }
-      >
-        <Table
-          rowKey="id"
-          size="small"
-          columns={scheduleColumns}
-          dataSource={schedules}
-          pagination={false}
-          loading={schedulesRequest.loading}
-          scroll={{ x: 1100 }}
-        />
-      </Card>
     </Space>
   );
 }
 
-export default GoogleCalendarPocPage;
+export default GoogleCalendarSettingsPage;

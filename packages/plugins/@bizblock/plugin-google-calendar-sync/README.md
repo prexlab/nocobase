@@ -1,6 +1,6 @@
 # BizBlock Google Calendar Sync
 
-PoC plugin for Google OAuth and Google Calendar list retrieval.
+Google OAuth and Google Calendar schedule synchronization plugin for BizBlock.
 
 ## Scope
 
@@ -9,5 +9,8 @@ PoC plugin for Google OAuth and Google Calendar list retrieval.
 - Receive OAuth callback
 - Store access / refresh token for the logged-in user
 - Fetch `calendarList` and display calendar IDs
+- Manage schedules from a user-facing NocoBase screen
+- Sync schedule create / update / delete operations with Google Calendar
+- Pull events from Google Calendar into NocoBase schedules
 
-This PoC stores OAuth tokens as plain text in NocoBase DB. Encrypt token fields before production use.
+This plugin currently stores OAuth tokens as plain text in the NocoBase DB. Encrypt token fields before production use.

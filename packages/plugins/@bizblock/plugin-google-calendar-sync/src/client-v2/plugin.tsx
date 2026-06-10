@@ -13,7 +13,7 @@ export class BizBlockGoogleCalendarSyncClientV2 extends Plugin<any, Application>
   async load() {
     this.pluginSettingsManager.addMenuItem({
       key: 'bizblock-google-calendar',
-      title: 'Google Calendar PoC',
+      title: 'Google Calendar Sync',
       icon: 'CalendarOutlined',
     });
 
@@ -21,8 +21,13 @@ export class BizBlockGoogleCalendarSyncClientV2 extends Plugin<any, Application>
       menuKey: 'bizblock-google-calendar',
       key: 'index',
       title: 'OAuth / Calendars',
-      componentLoader: () => import('./pages/GoogleCalendarPocPage'),
+      componentLoader: () => import('./pages/GoogleCalendarSettingsPage'),
       sort: -1,
+    });
+
+    this.router.add('bizblock.googleCalendar.schedules', {
+      path: '/admin/google-calendar/schedules',
+      componentLoader: () => import('./pages/GoogleCalendarSchedulesPage'),
     });
   }
 }

@@ -9,9 +9,9 @@
 
 import { useFlowContext } from '@nocobase/flow-engine';
 import React from 'react';
-import GoogleCalendarPocPage from '../../common/GoogleCalendarPocPage';
+import GoogleCalendarSchedulesPage from '../../common/GoogleCalendarSchedulesPage';
 
-export default function GoogleCalendarPocClientV2Page() {
+export default function GoogleCalendarSchedulesClientV2Page() {
   const ctx = useFlowContext();
-  return <GoogleCalendarPocPage api={ctx.api} />;
+  return <GoogleCalendarSchedulesPage api={ctx.api} />;
 }

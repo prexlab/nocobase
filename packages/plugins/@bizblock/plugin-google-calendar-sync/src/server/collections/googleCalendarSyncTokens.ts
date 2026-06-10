@@ -10,7 +10,8 @@
 import { defineCollection } from '@nocobase/database';
 
 export default defineCollection({
-  name: 'googleCalendarPocTokens',
+  name: 'googleCalendarSyncTokens',
+  tableName: 'googleCalendarSyncTokens',
   timestamps: true,
   fields: [
     {
