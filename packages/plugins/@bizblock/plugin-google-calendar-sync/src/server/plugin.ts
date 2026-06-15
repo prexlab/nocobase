@@ -28,6 +28,10 @@ const SETTINGS_COLLECTION = 'googleCalendarSyncSettings';
 const STATES_COLLECTION = 'googleCalendarSyncStates';
 const TOKENS_COLLECTION = 'googleCalendarSyncTokens';
 const SCHEDULES_COLLECTION = 'googleCalendarSyncSchedules';
+const SCHEDULES_PAGE_SCHEMA_UID = 'bizblock-google-calendar-schedules';
+const SCHEDULES_PAGE_MENU_SCHEMA_UID = 'bizblock-google-calendar-schedules-menu';
+const SCHEDULES_PAGE_TAB_SCHEMA_UID = 'bizblock-google-calendar-schedules-main';
+const SCHEDULES_PAGE_TAB_SCHEMA_NAME = 'bizblockGoogleCalendarSchedulesMain';
 
 type GoogleCalendarSummary = {
   id: string;
@@ -104,9 +108,218 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       name: `pm.${this.name}.google-calendar-sync`,
       actions: [`${RESOURCE_NAME}:*`],
     });
+
+    await this.ensureSchedulesDesktopRoute();
+  }
+
+  private async ensureSchedulesDesktopRoute() {
+    if (!this.app.db.hasCollection('desktopRoutes') || !this.app.db.hasCollection('uiSchemas')) {
+      return;
+    }
+
+    const desktopRoutesRepo = this.app.db.getRepository('desktopRoutes');
+    const uiSchemasRepo = this.app.db.getRepository('uiSchemas') as any;
+    let pageRoute = await desktopRoutesRepo.findOne({
+      filter: {
+        schemaUid: SCHEDULES_PAGE_SCHEMA_UID,
+      },
+    });
+
+    if (!pageRoute) {
+      pageRoute = await desktopRoutesRepo.create({
+        values: {
+          type: 'page',
+          title: 'Google Calendar',
+          icon: 'CalendarOutlined',
+          schemaUid: SCHEDULES_PAGE_SCHEMA_UID,
+          menuSchemaUid: SCHEDULES_PAGE_MENU_SCHEMA_UID,
+          enableTabs: false,
+          enableHeader: true,
+          displayTitle: true,
+          hideInMenu: false,
+          hidden: false,
+          children: [
+            {
+              type: 'tabs',
+              title: 'スケジュール管理',
+              icon: 'CalendarOutlined',
+              schemaUid: SCHEDULES_PAGE_TAB_SCHEMA_UID,
+              tabSchemaName: SCHEDULES_PAGE_TAB_SCHEMA_NAME,
+              hidden: true,
+            },
+          ],
+        },
+      });
+    } else {
+      await desktopRoutesRepo.update({
+        filterByTk: this.getValue(pageRoute, 'id'),
+        values: {
+          title: 'Google Calendar',
+          icon: 'CalendarOutlined',
+          type: 'page',
+          schemaUid: SCHEDULES_PAGE_SCHEMA_UID,
+          menuSchemaUid: SCHEDULES_PAGE_MENU_SCHEMA_UID,
+          enableTabs: false,
+          enableHeader: true,
+          displayTitle: true,
+          hideInMenu: false,
+          hidden: false,
+        },
+      });
+    }
+
+    const tabRoute = await desktopRoutesRepo.findOne({
+      filter: {
+        schemaUid: SCHEDULES_PAGE_TAB_SCHEMA_UID,
+      },
+    });
+    const pageRouteId = this.getValue(pageRoute, 'id');
+
+    if (!tabRoute) {
+      await desktopRoutesRepo.create({
+        values: {
+          parentId: pageRouteId,
+          type: 'tabs',
+          title: 'スケジュール管理',
+          icon: 'CalendarOutlined',
+          schemaUid: SCHEDULES_PAGE_TAB_SCHEMA_UID,
+          tabSchemaName: SCHEDULES_PAGE_TAB_SCHEMA_NAME,
+          hidden: true,
+        },
+      });
+    } else {
+      await desktopRoutesRepo.update({
+        filterByTk: this.getValue(tabRoute, 'id'),
+        values: {
+          parentId: pageRouteId,
+          type: 'tabs',
+          title: 'スケジュール管理',
+          icon: 'CalendarOutlined',
+          schemaUid: SCHEDULES_PAGE_TAB_SCHEMA_UID,
+          tabSchemaName: SCHEDULES_PAGE_TAB_SCHEMA_NAME,
+          hidden: true,
+        },
+      });
+    }
+
+    await this.ensureSchedulesPageUiSchema(uiSchemasRepo);
+
+    await this.grantSchedulesDesktopRouteToAllRoles(pageRouteId);
+  }
+
+  private async ensureSchedulesPageUiSchema(uiSchemasRepo) {
+    const pageNode = await uiSchemasRepo.findOne({
+      filter: {
+        'x-uid': SCHEDULES_PAGE_SCHEMA_UID,
+      },
+    });
+
+    if (!pageNode) {
+      await uiSchemasRepo.insert(this.getSchedulesPageSchema());
+      return;
+    }
+    await uiSchemasRepo.update({
+      filter: {
+        'x-uid': SCHEDULES_PAGE_SCHEMA_UID,
+      },
+      values: {
+        schema: this.getSchedulesPageNodeSchema(),
+      },
+    });
+
+    const tabNode = await uiSchemasRepo.findOne({
+      filter: {
+        'x-uid': SCHEDULES_PAGE_TAB_SCHEMA_UID,
+      },
+    });
+
+    if (!tabNode) {
+      await uiSchemasRepo.insertAdjacent('afterBegin', SCHEDULES_PAGE_SCHEMA_UID, this.getSchedulesPageTabSchema());
+      return;
+    }
+    await uiSchemasRepo.update({
+      filter: {
+        'x-uid': SCHEDULES_PAGE_TAB_SCHEMA_UID,
+      },
+      values: {
+        schema: this.getSchedulesPageTabNodeSchema(),
+      },
+    });
+  }
+
+  private getSchedulesPageSchema() {
+    return {
+      ...this.getSchedulesPageNodeSchema(),
+      'x-uid': SCHEDULES_PAGE_SCHEMA_UID,
+      properties: {
+        [SCHEDULES_PAGE_TAB_SCHEMA_NAME]: this.getSchedulesPageTabSchema(),
+      },
+    };
+  }
+
+  private getSchedulesPageNodeSchema() {
+    return {
+      type: 'void',
+      'x-component': 'Page',
+      'x-component-props': {
+        disablePageHeader: false,
+      },
+    };
+  }
+
+  private getSchedulesPageTabSchema() {
+    return {
+      ...this.getSchedulesPageTabNodeSchema(),
+      'x-uid': SCHEDULES_PAGE_TAB_SCHEMA_UID,
+    };
+  }
+
+  private getSchedulesPageTabNodeSchema() {
+    return {
+      type: 'void',
+      title: 'スケジュール管理',
+      'x-icon': 'CalendarOutlined',
+      'x-component': 'BizBlockGoogleCalendarSchedulesPage',
+    };
+  }
+
+  private async grantSchedulesDesktopRouteToAllRoles(pageRouteId) {
+    if (!this.app.db.hasCollection('roles') || !this.app.db.hasCollection('rolesDesktopRoutes')) {
+      return;
+    }
+
+    const roles = await this.app.db.getRepository('roles').find();
+    const rolesDesktopRoutesRepo = this.app.db.getRepository('rolesDesktopRoutes');
+    const routeIds = [pageRouteId];
+    const tabRoute = await this.app.db.getRepository('desktopRoutes').findOne({
+      filter: {
+        schemaUid: SCHEDULES_PAGE_TAB_SCHEMA_UID,
+      },
+    });
+
+    if (tabRoute) {
+      routeIds.push(this.getValue(tabRoute, 'id'));
+    }
+
+    for (const role of roles) {
+      const roleName = this.getValue(role, 'name');
+      if (!roleName) {
+        continue;
+      }
+      for (const desktopRouteId of routeIds) {
+        await rolesDesktopRoutesRepo.firstOrCreate({
+          filterKeys: ['desktopRouteId', 'roleName'],
+          values: {
+            desktopRouteId,
+            roleName,
+          },
+        });
+      }
+    }
   }
 
   getSettings = async (ctx, next) => {
+    this.requireAdmin(ctx);
     const settings = await this.readSettings();
     const defaultRedirectUri = this.getDefaultRedirectUri(ctx);
     const redirectUri = settings.redirectUri || defaultRedirectUri;
@@ -122,6 +335,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   };
 
   setSettings = async (ctx, next) => {
+    this.requireAdmin(ctx);
     const repo = ctx.db.getRepository(SETTINGS_COLLECTION);
     const existing = await repo.findOne();
     const values = ctx.action?.params?.values || {};
@@ -257,6 +471,8 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       calendars: token?.calendars || [],
       lastFetchedAt: token?.lastFetchedAt || null,
       scopes: GOOGLE_SCOPES,
+      currentUserId: userId,
+      isAdmin: this.isAdmin(ctx),
     };
     await next();
   };
@@ -334,6 +550,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   createSchedule = async (ctx, next) => {
     const values = this.getActionValues(ctx);
     const userId = this.normalizeUserId(values.userId || this.getCurrentUserId(ctx));
+    this.requireScheduleOwnerOrAdmin(ctx, userId);
     const scheduleValues = this.buildScheduleValues(ctx, values);
     const tokenRecord = await this.requireTokenForUser(ctx, userId);
     const settings = await this.requireSettings(ctx);
@@ -379,6 +596,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     if (!current || current.isDeleted) {
       ctx.throw(404, '予定が見つかりません');
     }
+    this.requireScheduleOwnerOrAdmin(ctx, current.userId);
     if (values.userId && String(values.userId) !== String(current.userId)) {
       ctx.throw(400, '予定のユーザー変更は未対応です');
     }
@@ -435,6 +653,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     if (!schedule || schedule.isDeleted) {
       ctx.throw(404, '予定が見つかりません');
     }
+    this.requireScheduleOwnerOrAdmin(ctx, schedule.userId);
 
     const tokenRecord = await this.requireTokenForUser(ctx, schedule.userId);
     const settings = await this.requireSettings(ctx);
@@ -466,7 +685,12 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
 
   syncFromGoogle = async (ctx, next) => {
     const values = this.getActionValues(ctx);
-    const targetUserId = this.getOptionalUserId(values.userId);
+    const currentUserId = this.getCurrentUserId(ctx);
+    const requestedUserId = this.getOptionalUserId(values.userId);
+    const targetUserId = this.isAdmin(ctx) ? requestedUserId : currentUserId;
+    if (!this.isAdmin(ctx) && requestedUserId && !this.isSameUserId(requestedUserId, currentUserId)) {
+      ctx.throw(403, '他ユーザーの予定は同期できません');
+    }
     const range = this.getDateRange(values);
     const tokenRecords = await this.getSyncTokenRecords(ctx, targetUserId);
     const settings = await this.requireSettings(ctx);
@@ -549,6 +773,31 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       ctx.throw(401, 'ログインユーザーを取得できません');
     }
     return userId;
+  }
+
+  private isAdmin(ctx) {
+    const roles = ctx.state?.currentRoles || [];
+    const role = ctx.state?.currentRole;
+    return roles.includes('root') || roles.includes('admin') || role === 'root' || role === 'admin';
+  }
+
+  private requireAdmin(ctx) {
+    if (!this.isAdmin(ctx)) {
+      ctx.throw(403, '管理者のみ操作できます');
+    }
+  }
+
+  private requireScheduleOwnerOrAdmin(ctx, userId) {
+    if (this.isAdmin(ctx)) {
+      return;
+    }
+    if (!this.isSameUserId(userId, this.getCurrentUserId(ctx))) {
+      ctx.throw(403, '他ユーザーの予定は操作できません');
+    }
+  }
+
+  private isSameUserId(a, b) {
+    return String(a) === String(b);
   }
 
   private getActionValues(ctx) {

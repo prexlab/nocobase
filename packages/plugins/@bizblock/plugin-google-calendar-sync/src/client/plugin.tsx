@@ -13,15 +13,14 @@ import GoogleCalendarSettingsPage from './pages/GoogleCalendarSettingsPage';
 
 export class BizBlockGoogleCalendarSyncClient extends Plugin {
   async load() {
+    this.app.addComponents({
+      BizBlockGoogleCalendarSchedulesPage: GoogleCalendarSchedulesPage,
+    });
+
     this.pluginSettingsManager.add('bizblock-google-calendar', {
       title: 'Google Calendar Sync',
       icon: 'CalendarOutlined',
       Component: GoogleCalendarSettingsPage,
-    });
-
-    this.router.add('bizblock-google-calendar-schedules', {
-      path: '/admin/google-calendar/schedules',
-      Component: GoogleCalendarSchedulesPage,
     });
   }
 }

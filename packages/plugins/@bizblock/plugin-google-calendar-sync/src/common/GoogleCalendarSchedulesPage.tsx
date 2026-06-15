@@ -8,11 +8,13 @@
  */
 
 import React, { useMemo, useState } from 'react';
+import { MoreOutlined } from '@ant-design/icons';
 import {
   Alert,
   Button,
   Card,
   DatePicker,
+  Dropdown,
   Form,
   Input,
   Modal,
@@ -131,6 +133,10 @@ function serializeScheduleValues(values: ScheduleForm) {
   };
 }
 
+function isSameUserId(a?: number | string, b?: number | string) {
+  return String(a || '') === String(b || '');
+}
+
 export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
   const [scheduleForm] = Form.useForm<ScheduleForm>();
   const [filterForm] = Form.useForm<ScheduleFilters>();
@@ -141,6 +147,13 @@ export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
     startAt: dayjs().startOf('month'),
     endAt: dayjs().endOf('month'),
   }));
+
+  const statusRequest = useRequest(() =>
+    api.request({
+      url: 'googleCalendarSync:status',
+      method: 'get',
+    }),
+  );
 
   const usersRequest = useRequest(() =>
     api.request({
@@ -161,9 +174,82 @@ export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
     },
   );
 
+  const status = unwrap(statusRequest.data);
   const users: UserRow[] = unwrap(usersRequest.data).users || [];
-  const connectedUsers = users.filter((user) => user.connected);
+  const currentUserId = status.currentUserId;
+  const isAdmin = Boolean(status.isAdmin);
+  const manageableUsers = isAdmin ? users : users.filter((user) => isSameUserId(user.id, currentUserId));
+  const connectedUsers = manageableUsers.filter((user) => user.connected);
   const schedules: ScheduleRow[] = unwrap(schedulesRequest.data).schedules || [];
+  const googleConnectionStatus = statusRequest.loading
+    ? { color: 'processing', text: 'Google連携確認中' }
+    : !status.configured
+      ? { color: 'warning', text: 'OAuth未設定' }
+      : status.connected
+        ? { color: 'success', text: 'Google連携済み' }
+        : { color: 'default', text: 'Google未連携' };
+  const googleConnectionAccount = status.googleAccountEmail || status.selectedCalendarId || '';
+
+  const authorizeRequest = useRequest(
+    () =>
+      api.request({
+        url: 'googleCalendarSync:authorize',
+        method: 'post',
+      }),
+    {
+      manual: true,
+      onSuccess(response) {
+        const authorizeUrl = unwrap(response).authorizeUrl;
+        if (!authorizeUrl) {
+          message.error('Google 認証 URL を取得できませんでした');
+          return;
+        }
+        window.location.href = authorizeUrl;
+      },
+      onError(error) {
+        message.error(error?.message || 'Google 認証を開始できませんでした');
+      },
+    },
+  );
+
+  const listCalendarsRequest = useRequest(
+    () =>
+      api.request({
+        url: 'googleCalendarSync:listCalendars',
+        method: 'post',
+      }),
+    {
+      manual: true,
+      onSuccess() {
+        message.success('カレンダー情報を更新しました');
+        statusRequest.refresh();
+        usersRequest.refresh();
+      },
+      onError(error) {
+        message.error(error?.message || 'カレンダー情報の更新に失敗しました');
+      },
+    },
+  );
+
+  const disconnectRequest = useRequest(
+    () =>
+      api.request({
+        url: 'googleCalendarSync:disconnect',
+        method: 'post',
+      }),
+    {
+      manual: true,
+      onSuccess() {
+        message.success('Google連携を解除しました');
+        statusRequest.refresh();
+        usersRequest.refresh();
+        schedulesRequest.refresh();
+      },
+      onError(error) {
+        message.error(error?.message || 'Google連携の解除に失敗しました');
+      },
+    },
+  );
 
   const saveScheduleRequest = useRequest(
     (values: ScheduleForm) => {
@@ -227,6 +313,7 @@ export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
         if (data.errors?.length) {
           message.warning(`${data.errors.length}ユーザーで同期エラーがあります`);
         }
+        statusRequest.refresh();
         usersRequest.refresh();
         schedulesRequest.refresh();
       },
@@ -252,13 +339,13 @@ export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
       users.map((user) => ({
         label: user.connected ? userLabel(user) : `${userLabel(user)} / 未連携`,
         value: String(user.id),
-        disabled: !user.connected,
+        disabled: !user.connected || (!isAdmin && !isSameUserId(user.id, currentUserId)),
       })),
-    [users],
+    [currentUserId, isAdmin, users],
   );
 
   const openCreateSchedule = () => {
-    const defaultUser = connectedUsers[0];
+    const defaultUser = connectedUsers.find((user) => isSameUserId(user.id, currentUserId)) || connectedUsers[0];
     const startAt = dayjs().add(1, 'hour').startOf('hour');
     setEditingSchedule(null);
     scheduleForm.setFieldsValue({
@@ -357,21 +444,24 @@ export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
         key: 'actions',
         fixed: 'right' as const,
         width: 150,
-        render: (_: any, record: ScheduleRow) => (
-          <Space size={8}>
-            <Button size="small" onClick={() => openEditSchedule(record)}>
-              編集
-            </Button>
-            <Popconfirm title="削除しますか？" onConfirm={() => deleteScheduleRequest.run(record.id)}>
-              <Button size="small" danger loading={deleteScheduleRequest.loading}>
-                削除
+        render: (_: any, record: ScheduleRow) =>
+          isAdmin || isSameUserId(record.userId, currentUserId) ? (
+            <Space size={8}>
+              <Button size="small" onClick={() => openEditSchedule(record)}>
+                編集
               </Button>
-            </Popconfirm>
-          </Space>
-        ),
+              <Popconfirm title="削除しますか？" onConfirm={() => deleteScheduleRequest.run(record.id)}>
+                <Button size="small" danger loading={deleteScheduleRequest.loading}>
+                  削除
+                </Button>
+              </Popconfirm>
+            </Space>
+          ) : (
+            '-'
+          ),
       },
     ],
-    [deleteScheduleRequest.loading],
+    [currentUserId, deleteScheduleRequest.loading, isAdmin],
   );
 
   const handleScheduleSearch = (values: ScheduleFilters) => {
@@ -388,22 +478,82 @@ export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
     saveScheduleRequest.run(values);
   };
 
+  const scheduleActionMenuItems = [
+    {
+      key: 'authorize',
+      label: status.connected ? 'Google認証をやり直す' : 'Google認証を開始',
+      disabled: !status.configured || authorizeRequest.loading,
+    },
+    {
+      key: 'refreshCalendars',
+      label: 'カレンダー情報を更新',
+      disabled: !status.connected || listCalendarsRequest.loading,
+    },
+    {
+      key: 'syncFromGoogle',
+      label: 'Google Calendarから同期',
+      disabled: !connectedUsers.length || syncFromGoogleRequest.loading,
+    },
+    {
+      key: 'refreshSchedules',
+      label: '一覧を更新',
+      disabled: schedulesRequest.loading,
+    },
+    {
+      type: 'divider' as const,
+    },
+    {
+      key: 'disconnect',
+      label: '連携解除',
+      danger: true,
+      disabled: !status.connected || disconnectRequest.loading,
+    },
+  ];
+
+  const handleGoogleConnectionMenuClick = ({ key }: { key: string }) => {
+    if (key === 'authorize') {
+      authorizeRequest.run();
+      return;
+    }
+
+    if (key === 'refreshCalendars') {
+      listCalendarsRequest.run();
+      return;
+    }
+
+    if (key === 'syncFromGoogle') {
+      syncFromGoogleRequest.run();
+      return;
+    }
+
+    if (key === 'refreshSchedules') {
+      schedulesRequest.refresh();
+      return;
+    }
+
+    if (key === 'disconnect') {
+      Modal.confirm({
+        title: 'Google連携を解除しますか？',
+        content: googleConnectionAccount || undefined,
+        okText: '解除',
+        okButtonProps: { danger: true },
+        cancelText: 'キャンセル',
+        onOk: () => disconnectRequest.run(),
+      });
+    }
+  };
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      {!connectedUsers.length ? (
+      {!statusRequest.loading && !status.configured ? (
+        <Alert type="warning" showIcon message="Google OAuth設定が未設定です。管理者に設定を依頼してください。" />
+      ) : null}
+      {!statusRequest.loading && status.configured && !connectedUsers.length ? (
         <Alert
           type="warning"
           showIcon
           message="Google連携済みユーザーがありません"
-          description={
-            <Typography.Text>
-              先に{' '}
-              <Typography.Link href="/admin/settings/bizblock-google-calendar">
-                Google Calendar Sync設定
-              </Typography.Link>{' '}
-              でGoogle認証を完了してください。
-            </Typography.Text>
-          }
+          description="予定を登録・同期するには、自分のGoogle連携を完了してください。"
         />
       ) : null}
 
@@ -411,18 +561,36 @@ export function GoogleCalendarSchedulesPage({ api }: { api: ApiClient }) {
         title="スケジュール管理"
         extra={
           <Space wrap>
+            <Space size={8}>
+              <Tag color={googleConnectionStatus.color}>{googleConnectionStatus.text}</Tag>
+              {googleConnectionAccount ? (
+                <Typography.Text type="secondary" ellipsis style={{ maxWidth: 220 }}>
+                  {googleConnectionAccount}
+                </Typography.Text>
+              ) : null}
+              <Dropdown
+                menu={{
+                  items: scheduleActionMenuItems,
+                  onClick: handleGoogleConnectionMenuClick,
+                }}
+                placement="bottomRight"
+                trigger={['click']}
+              >
+                <Button
+                  aria-label="Google連携メニュー"
+                  icon={<MoreOutlined />}
+                  loading={
+                    authorizeRequest.loading ||
+                    listCalendarsRequest.loading ||
+                    syncFromGoogleRequest.loading ||
+                    schedulesRequest.loading ||
+                    disconnectRequest.loading
+                  }
+                />
+              </Dropdown>
+            </Space>
             <Button type="primary" onClick={openCreateSchedule} disabled={!connectedUsers.length}>
               新規予定
-            </Button>
-            <Button
-              onClick={() => syncFromGoogleRequest.run()}
-              loading={syncFromGoogleRequest.loading}
-              disabled={!connectedUsers.length}
-            >
-              Google Calendarから同期
-            </Button>
-            <Button onClick={() => schedulesRequest.refresh()} loading={schedulesRequest.loading}>
-              更新
             </Button>
           </Space>
         }

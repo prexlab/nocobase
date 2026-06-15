@@ -8,9 +8,14 @@
  */
 
 import { Application, Plugin } from '@nocobase/client-v2';
+import GoogleCalendarSchedulesPage from './pages/GoogleCalendarSchedulesPage';
 
 export class BizBlockGoogleCalendarSyncClientV2 extends Plugin<any, Application> {
   async load() {
+    this.app.addComponents({
+      BizBlockGoogleCalendarSchedulesPage: GoogleCalendarSchedulesPage,
+    });
+
     this.pluginSettingsManager.addMenuItem({
       key: 'bizblock-google-calendar',
       title: 'Google Calendar Sync',
@@ -23,11 +28,6 @@ export class BizBlockGoogleCalendarSyncClientV2 extends Plugin<any, Application>
       title: 'OAuth / Calendars',
       componentLoader: () => import('./pages/GoogleCalendarSettingsPage'),
       sort: -1,
-    });
-
-    this.router.add('bizblock.googleCalendar.schedules', {
-      path: '/admin/google-calendar/schedules',
-      componentLoader: () => import('./pages/GoogleCalendarSchedulesPage'),
     });
   }
 }
