@@ -130,7 +130,11 @@ const APPLY_BLUEPRINT_BLOCK_TYPE_ENUM = [
   'jsBlock',
   'tree',
 ];
-const APPROVAL_BLUEPRINT_BLOCK_TYPE_ENUM = [...APPROVAL_BLOCK_PUBLIC_KEYS];
+const APPROVAL_BLUEPRINT_GENERIC_BLOCK_TYPE_ENUM = ['markdown', 'jsBlock'];
+const APPROVAL_BLUEPRINT_BLOCK_TYPE_ENUM = [
+  ...APPROVAL_BLOCK_PUBLIC_KEYS,
+  ...APPROVAL_BLUEPRINT_GENERIC_BLOCK_TYPE_ENUM,
+];
 const COMPOSE_BLOCK_TYPE_ENUM = [...APPLY_BLUEPRINT_BLOCK_TYPE_ENUM, ...APPROVAL_BLOCK_PUBLIC_KEYS];
 const RELATION_FIELD_TYPE_ENUM = [
   'text',
@@ -205,6 +209,117 @@ function jsonContent(schema: Record<string, any>, example?: Record<string, any>)
       schema,
       ...(example ? { example } : {}),
     },
+  };
+}
+
+function flowSurfaceErrorItemSchema() {
+  return {
+    type: 'object',
+    properties: {
+      index: {
+        type: 'integer',
+        description: 'Optional 1-based position in an aggregate authoring errors[] response',
+        example: 1,
+      },
+      code: {
+        type: 'string',
+        description: 'Stable machine-readable error code',
+        example: 'FLOW_SURFACE_BAD_REQUEST',
+      },
+      message: {
+        type: 'string',
+        description: 'Human-readable error message for the caller',
+      },
+      status: {
+        type: 'integer',
+        description: 'HTTP status mapped from the FlowSurfaces error',
+        example: 400,
+      },
+      type: {
+        type: 'string',
+        description: 'Error category such as bad_request, forbidden, conflict or internal_error',
+        example: 'bad_request',
+        enum: ['bad_request', 'forbidden', 'conflict', 'internal_error'],
+      },
+      path: {
+        type: 'string',
+        description: 'Optional JSON-path-like request location for validation errors',
+        example: '$.changes.titleField',
+      },
+      ruleId: {
+        type: 'string',
+        description: 'Optional stable machine-readable validation rule id',
+        example: 'relation-titleField-unreadable',
+      },
+      details: {
+        type: 'object',
+        description: 'Optional structured context that helps callers repair the request',
+        additionalProperties: true,
+        example: {
+          action: 'configure',
+          fieldPath: 'manager',
+          titleField: 'id',
+          targetCollection: 'employees',
+          invalidReason: 'id',
+          availableFields: ['nickname', 'title'],
+          suggestion: 'Use one of: nickname, title.',
+        },
+      },
+    },
+    required: ['message', 'type', 'code', 'status'],
+    additionalProperties: false,
+  };
+}
+
+function flowSurfaceAggregateRepairDetailsSchema() {
+  return {
+    type: 'object',
+    description:
+      'Optional aggregate authoring repair contract. When present, callers should fix every listed child error before retrying the same write.',
+    properties: {
+      errorCount: {
+        type: 'integer',
+        description: 'Number of child errors in the aggregate response',
+        example: 2,
+      },
+      mustFixAllErrorsBeforeRetry: {
+        type: 'boolean',
+        example: true,
+      },
+      retryPolicy: {
+        type: 'string',
+        example: 'fix_all_errors_before_retry_same_write',
+      },
+      sameWriteRetryRequired: {
+        type: 'boolean',
+        example: true,
+      },
+      agentInstruction: {
+        type: 'string',
+        description: 'Human-readable repair instruction for agentic callers',
+      },
+      requiredBlockPolicy: {
+        type: 'object',
+        properties: {
+          requiredBlockTypes: {
+            type: 'array',
+            items: {
+              type: 'string',
+            },
+          },
+          fixStrategy: {
+            type: 'string',
+            example: 'repair_same_block_type',
+          },
+          doNotReplaceOrDrop: {
+            type: 'boolean',
+            example: true,
+          },
+        },
+        additionalProperties: true,
+      },
+    },
+    additionalProperties: true,
   };
 }
 
@@ -411,7 +526,7 @@ function buildReactionCapabilitySchema(
 }
 
 const FLOW_SURFACES_READ_ACL_NOTE =
-  'Read actions (`get` / `describeSurface` / `catalog` / `context` / `getReactionMeta` / `getEventFlowMeta` / `listTemplates` / `getTemplate`) are open to `loggedIn` by default. Write actions still require the `ui.flowSurfaces` snippet.';
+  'Read actions (`get` / `describeSurface` / `exportBlueprint` / `catalog` / `context` / `getReactionMeta` / `getEventFlowMeta` / `listTemplates` / `getTemplate`) are open to `loggedIn` by default. Write actions still require the `ui.flowSurfaces` snippet.';
 
 const templateActionDocs = createFlowSurfaceTemplateActionDocs({
   tag: FLOW_SURFACES_TAG,
@@ -524,6 +639,15 @@ const actionDocs: Record<string, any> = {
     requestBody: requestBody('FlowSurfaceDescribeSurfaceRequest', examples.describeSurface),
     responses: responses('FlowSurfaceDescribeSurfaceResponse'),
   },
+  exportBlueprint: {
+    tags: [FLOW_SURFACES_TAG],
+    summary: 'Export one root Modern page as an applyBlueprint replace document',
+    description: valuesCompatibilityNote(
+      `Exports an existing root flow page into a v1 \`FlowSurfaceApplyBlueprintDocument\` that can be sent back to \`flowSurfaces:applyBlueprint\` for same-instance \`replace\`. The request body uses \`{ target, options }\` and does not change the \`flowSurfaces:get\` GET query-locator contract. v1 only supports root page export; block, field, action, tab, and \`tabSchemaUid\` subtree targets return HTTP 400. The exported document intentionally omits \`navigation\` and does not expose raw \`tree\`, \`nodeMap\`, node uid, internal refs, or internal metadata. \`document.target.pageSchemaUid\` is retained for same-instance replace. ${FLOW_SURFACES_READ_ACL_NOTE}`,
+    ),
+    requestBody: requestBody('FlowSurfaceExportBlueprintRequest', examples.exportBlueprint),
+    responses: responses('FlowSurfaceExportBlueprintResponse'),
+  },
   applyBlueprint: {
     tags: [FLOW_SURFACES_TAG],
     summary: 'Apply a page blueprint to create or replace one Modern page',
@@ -560,7 +684,7 @@ const actionDocs: Record<string, any> = {
     tags: [FLOW_SURFACES_TAG],
     summary: 'Apply an approval blueprint to initiator, approver, or task-card surfaces',
     description: valuesCompatibilityNote(
-      "Builds workflow-approval configuration surfaces through the existing flowSurfaces orchestration layer instead of a separate approval resource. This is the preferred whole-surface bootstrap / replace entry for approval initiator, approver, and task-card UIs. Unlike route-backed `applyBlueprint`, this action targets approval-bound FlowModel roots stored on approval workflow trigger config (`workflow.config.approvalUid` / `workflow.config.taskCardUid`) or approval node config (`node.config.approvalUid` / `node.config.taskCardUid`). The backend creates or reuses the correct approval root automatically, rewrites the binding uid, applies a `replace` blueprint to that root, and reconciles approval runtime config derived from approval actions such as withdraw / approve / reject / return / delegate / add-assignee. `surface='initiator'` requires `workflowId` and writes page-like `blocks + layout` into `TriggerChildPageModel -> TriggerChildPageTabModel -> TriggerBlockGridModel`. `surface='approver'` requires `nodeId` and writes page-like `blocks + layout` into `ApprovalChildPageModel -> ApprovalChildPageTabModel -> ApprovalBlockGridModel`. Page-like `blocks[]` may either declare a concrete `type` or reuse a saved block template through `template: { uid, mode }`. `surface='taskCard'` requires exactly one of `workflowId` or `nodeId` and writes `fields + layout` into `ApplyTaskCardDetailsModel` or `ApprovalTaskCardDetailsModel`. This v1 action does not cover legacy schema-config wiring; it focuses on approval FlowModel construction, binding persistence, and approval runtime-config synchronization. When `layout` is omitted, the backend generates a simple top-to-bottom layout for the resulting blocks or fields.",
+      "Builds workflow-approval configuration surfaces through the existing flowSurfaces orchestration layer instead of a separate approval resource. This is the preferred whole-surface bootstrap / replace entry for approval initiator, approver, and task-card UIs. Unlike route-backed `applyBlueprint`, this action targets approval-bound FlowModel roots stored on approval workflow trigger config (`workflow.config.approvalUid` / `workflow.config.taskCardUid`) or approval node config (`node.config.approvalUid` / `node.config.taskCardUid`). The backend creates or reuses the correct approval root automatically, rewrites the binding uid, applies a `replace` blueprint to that root, and reconciles approval runtime config derived from approval actions such as withdraw / approve / reject / return / delegate / add-assignee. `surface='initiator'` requires `workflowId` and writes page-like `blocks + layout` into `TriggerChildPageModel -> TriggerChildPageTabModel -> TriggerBlockGridModel`. `approvalInitiator` creates `approvalSubmit` by default; do not include `approvalSubmit` in `blocks[].actions`, otherwise authoring validation returns aggregate `errors[]` and the same write must be retried after removing it. `surface='approver'` requires `nodeId` and writes page-like `blocks + layout` into `ApprovalChildPageModel -> ApprovalChildPageTabModel -> ApprovalBlockGridModel`. Page-like `blocks[]` may declare approval-specific block types, fixed generic block types (`markdown`, `jsBlock`), or reuse a saved block template through `template: { uid, mode }`. `surface='taskCard'` requires exactly one of `workflowId` or `nodeId` and writes `fields + layout` into `ApplyTaskCardDetailsModel` or `ApprovalTaskCardDetailsModel`. This v1 action does not cover legacy schema-config wiring; it focuses on approval FlowModel construction, binding persistence, and approval runtime-config synchronization. When `layout` is omitted, the backend generates a simple top-to-bottom layout for the resulting blocks or fields.",
     ),
     requestBody: {
       required: true,
@@ -1272,6 +1396,152 @@ const schemas = {
     },
     additionalProperties: false,
   },
+  FlowSurfaceExportBlueprintUnsupportedPolicy: {
+    type: 'string',
+    enum: ['error', 'warn'],
+    description:
+      '`error` rejects visible nodes the v1 mapper cannot express. `warn` skips them and reports warnings/unsupported items.',
+  },
+  FlowSurfaceExportBlueprintUnsupportedItem: {
+    type: 'object',
+    required: ['kind', 'path', 'reasonCode', 'manualAction'],
+    properties: {
+      kind: {
+        type: 'string',
+        enum: ['page', 'tab', 'block', 'field', 'action', 'recordAction', 'reaction', 'layout', 'popup'],
+      },
+      use: {
+        type: 'string',
+        example: 'UnknownModel',
+      },
+      type: {
+        type: 'string',
+        example: 'unknown',
+      },
+      path: {
+        type: 'string',
+        example: '$.tabs[0].blocks[2]',
+      },
+      reasonCode: {
+        type: 'string',
+        example: 'unsupported-node',
+      },
+      manualAction: {
+        type: 'string',
+        example: 'Recreate this block manually or add mapper support.',
+      },
+    },
+    additionalProperties: false,
+  },
+  FlowSurfaceExportBlueprintTarget: {
+    oneOf: [
+      {
+        type: 'object',
+        required: ['uid'],
+        properties: {
+          uid: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      {
+        type: 'object',
+        required: ['pageSchemaUid'],
+        properties: {
+          pageSchemaUid: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      {
+        type: 'object',
+        required: ['tabSchemaUid'],
+        properties: {
+          tabSchemaUid: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      {
+        type: 'object',
+        required: ['routeId'],
+        properties: {
+          routeId: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+    ],
+    description:
+      'Exactly one root locator. v1 accepts pageSchemaUid, routeId, or a uid that resolves to the root page. tabSchemaUid and non-root uid targets return HTTP 400.',
+  },
+  FlowSurfaceExportBlueprintRequest: {
+    type: 'object',
+    required: ['target'],
+    properties: {
+      target: ref('FlowSurfaceExportBlueprintTarget'),
+      options: {
+        type: 'object',
+        properties: {
+          unsupported: ref('FlowSurfaceExportBlueprintUnsupportedPolicy'),
+        },
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  },
+  FlowSurfaceExportBlueprintSource: {
+    type: 'object',
+    required: ['target'],
+    properties: {
+      target: ref('FlowSurfaceApplyBlueprintTarget'),
+      pageTitle: {
+        type: 'string',
+      },
+    },
+    additionalProperties: false,
+  },
+  FlowSurfaceExportBlueprintDocument: {
+    type: 'object',
+    required: ['version', 'mode', 'target', 'tabs', 'assets'],
+    description:
+      'Prepared v1 applyBlueprint document in replace mode. It intentionally omits navigation and retains target.pageSchemaUid for same-instance replace.',
+    properties: {
+      version: {
+        type: 'string',
+        enum: ['1'],
+      },
+      mode: {
+        type: 'string',
+        enum: ['replace'],
+      },
+      target: ref('FlowSurfaceApplyBlueprintTarget'),
+      page: ref('FlowSurfaceApplyBlueprintPage'),
+      tabs: {
+        type: 'array',
+        minItems: 1,
+        items: ref('FlowSurfaceApplyBlueprintTab'),
+      },
+      assets: ref('FlowSurfaceApplyBlueprintAssets'),
+      reaction: ref('FlowSurfaceApplyBlueprintReaction'),
+    },
+    additionalProperties: false,
+  },
+  FlowSurfaceExportBlueprintResponse: {
+    type: 'object',
+    required: ['document', 'source', 'warnings', 'unsupported'],
+    properties: {
+      document: ref('FlowSurfaceExportBlueprintDocument'),
+      source: ref('FlowSurfaceExportBlueprintSource'),
+      warnings: {
+        type: 'array',
+        items: {
+          type: 'string',
+        },
+      },
+      unsupported: {
+        type: 'array',
+        items: ref('FlowSurfaceExportBlueprintUnsupportedItem'),
+      },
+    },
+    additionalProperties: false,
+  },
   FlowSurfaceMutateWriteTarget: {
     type: 'object',
     required: ['uid'],
@@ -1830,6 +2100,10 @@ const schemas = {
       },
       schemaUid: {
         type: 'string',
+      },
+      menuSchemaUid: {
+        type: 'string',
+        nullable: true,
       },
       tabSchemaName: {
         type: 'string',
@@ -4311,7 +4585,7 @@ const schemas = {
     type: 'object',
     required: ['surface'],
     description:
-      "Simplified approval-surface blueprint request for workflow approval UIs. This is the preferred bootstrap / replace route for approval initiator, approver, and task-card surfaces. `version` may be omitted and defaults to '1'. `mode` may be omitted and defaults to `replace`; v1 only supports `replace`. Runtime validation enforces binding rules: `initiator` requires `workflowId`, `approver` requires `nodeId`, and `taskCard` requires exactly one of `workflowId` or `nodeId`. Page-like surfaces (`initiator`, `approver`) accept `blocks + layout`; each block may declare `type` directly or reuse `template: { uid, mode }`. `taskCard` accepts `fields + layout`. This route does not perform schema wiring, but it does persist binding fields and reconcile approval runtime config from approval actions.",
+      "Simplified approval-surface blueprint request for workflow approval UIs. This is the preferred bootstrap / replace route for approval initiator, approver, and task-card surfaces. `version` may be omitted and defaults to '1'. `mode` may be omitted and defaults to `replace`; v1 only supports `replace`. Runtime validation enforces binding rules: `initiator` requires `workflowId`, `approver` requires `nodeId`, and `taskCard` requires exactly one of `workflowId` or `nodeId`. Page-like surfaces (`initiator`, `approver`) accept `blocks + layout`; each block may declare approval-specific types, fixed generic types (`markdown`, `jsBlock`), or reuse `template: { uid, mode }`. `approvalInitiator` creates `approvalSubmit` by default, so callers should only add optional initiator actions such as `approvalSaveDraft` or `approvalWithdraw`. `taskCard` accepts `fields + layout`. This route does not perform schema wiring, but it does persist binding fields and reconcile approval runtime config from approval actions. Authoring validation failures use the same aggregate `errors[]` retry contract as `applyBlueprint`.",
     properties: {
       version: {
         type: 'string',
@@ -4432,6 +4706,9 @@ const schemas = {
       pageSchemaUid: {
         type: 'string',
       },
+      menuSchemaUid: {
+        type: 'string',
+      },
       pageUid: {
         type: 'string',
       },
@@ -4543,6 +4820,9 @@ const schemas = {
         nullable: true,
       },
       pageSchemaUid: {
+        type: 'string',
+      },
+      menuSchemaUid: {
         type: 'string',
       },
       pageUid: {
@@ -5097,6 +5377,16 @@ const schemas = {
       type: {
         type: 'string',
         enum: ['bad_request', 'forbidden', 'conflict', 'internal_error'],
+      },
+      errorCount: {
+        type: 'integer',
+        description: 'Present for aggregate authoring failures and equal to errors.length',
+      },
+      details: flowSurfaceAggregateRepairDetailsSchema(),
+      errors: {
+        type: 'array',
+        description: 'Present for aggregate item failures; contains the structured child authoring errors',
+        items: flowSurfaceErrorItemSchema(),
       },
     },
     required: ['message', 'type', 'code', 'status'],
@@ -6033,59 +6323,21 @@ const schemas = {
       ],
     },
     properties: {
+      message: {
+        type: 'string',
+        description: 'Present for aggregate authoring failures and summarizes the full validation batch',
+        example:
+          'flowSurfaces authoring validation failed with 2 error(s); fix all errors before retrying the same write',
+      },
+      errorCount: {
+        type: 'integer',
+        description: 'Present for aggregate authoring failures and equal to errors.length',
+        example: 2,
+      },
+      details: flowSurfaceAggregateRepairDetailsSchema(),
       errors: {
         type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            code: {
-              type: 'string',
-              description: 'Stable machine-readable error code',
-              example: 'FLOW_SURFACE_BAD_REQUEST',
-            },
-            message: {
-              type: 'string',
-              description: 'Human-readable error message for the caller',
-            },
-            status: {
-              type: 'integer',
-              description: 'HTTP status mapped from the FlowSurfaces error',
-              example: 400,
-            },
-            type: {
-              type: 'string',
-              description: 'Error category such as bad_request, forbidden, conflict or internal_error',
-              example: 'bad_request',
-              enum: ['bad_request', 'forbidden', 'conflict', 'internal_error'],
-            },
-            path: {
-              type: 'string',
-              description: 'Optional JSON-path-like request location for validation errors',
-              example: '$.changes.titleField',
-            },
-            ruleId: {
-              type: 'string',
-              description: 'Optional stable machine-readable validation rule id',
-              example: 'relation-titleField-unreadable',
-            },
-            details: {
-              type: 'object',
-              description: 'Optional structured context that helps callers repair the request',
-              additionalProperties: true,
-              example: {
-                action: 'configure',
-                fieldPath: 'manager',
-                titleField: 'id',
-                targetCollection: 'employees',
-                invalidReason: 'id',
-                availableFields: ['nickname', 'title'],
-                suggestion: 'Use one of: nickname, title.',
-              },
-            },
-          },
-          required: ['message', 'type', 'code', 'status'],
-          additionalProperties: false,
-        },
+        items: flowSurfaceErrorItemSchema(),
       },
     },
     additionalProperties: true,

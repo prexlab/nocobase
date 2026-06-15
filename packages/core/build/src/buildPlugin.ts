@@ -181,9 +181,7 @@ const external = [
   '@langchain/ollama',
   '@langchain/mcp-adapters',
 ];
-const pluginPrefix = (
-  process.env.PLUGIN_PACKAGE_PREFIX || '@nocobase/plugin-,@nocobase/preset-,@nocobase/plugin-pro-'
-).split(',');
+const pluginPrefix = (process.env.PLUGIN_PACKAGE_PREFIX || '@nocobase/plugin-,@nocobase/preset-').split(',');
 
 const target_dir = 'dist';
 
@@ -346,6 +344,7 @@ export async function buildServerDeps(cwd: string, serverFiles: string[], log: P
     }
 
     // copy package
+    await fs.remove(outputDir);
     await fs.copy(depDir, outputDir, { errorOnExist: false });
 
     // delete files

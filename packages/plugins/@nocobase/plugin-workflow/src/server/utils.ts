@@ -91,38 +91,41 @@ export async function abortExecution(
   options: AbortOptions = {},
 ): Promise<boolean> {
   const logger = plugin.getLogger(execution.workflowId);
-  const ownTransaction = !options.transaction;
-  const transaction = options.transaction ?? (await plugin.useDataSourceTransaction('main', null, true));
+  const transaction = options.transaction ?? undefined;
   const ExecutionRepo = plugin.db.getRepository('executions');
   const JobRepo = plugin.db.getRepository('jobs');
 
   try {
-    const lockedExecution = await ExecutionRepo.findOne({
-      filterByTk: execution.id,
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!lockedExecution || lockedExecution.status !== EXECUTION_STATUS.STARTED) {
-      if (ownTransaction) {
-        await transaction.commit();
-      }
-      return false;
+    if (!transaction) {
+      return plugin.db.sequelize.transaction((transaction) =>
+        abortExecution(plugin, execution, {
+          ...options,
+          transaction,
+        }),
+      );
     }
 
-    await lockedExecution.update(
-      {
-        status: EXECUTION_STATUS.ABORTED,
-        ...(options.reason
-          ? {
-              reason: options.reason,
-            }
-          : {}),
+    const abortValues = {
+      status: EXECUTION_STATUS.ABORTED,
+      ...(options.reason
+        ? {
+            reason: options.reason,
+          }
+        : {}),
+    };
+
+    const [affected] = await ExecutionRepo.model.update(abortValues, {
+      where: {
+        id: execution.id,
+        status: EXECUTION_STATUS.STARTED,
       },
-      {
-        transaction,
-      },
-    );
+      individualHooks: true,
+      transaction,
+    });
+
+    if (!affected) {
+      return false;
+    }
 
     const updated = await JobRepo.update({
       values: {
@@ -148,27 +151,21 @@ export async function abortExecution(
       await abortExecution(plugin, child, { transaction, reason: EXECUTION_REASON.PARENT_ABORTED });
     }
 
-    afterTransactionCommit(transaction, () => {
+    const updateLocalState = () => {
       execution.set('status', EXECUTION_STATUS.ABORTED);
       execution.set('reason', options.reason ?? null);
       plugin.timeoutManager.clear(execution.id);
       plugin.abortRunningExecution(execution.id, options.reason);
-    });
+    };
+    afterTransactionCommit(transaction, updateLocalState);
 
     logger.info(`execution (${execution.id}) aborted`, {
       workflowId: execution.workflowId,
       pendingJobs: Array.isArray(updated) ? updated.length : updated,
     });
 
-    if (ownTransaction) {
-      await transaction.commit();
-    }
-
     return true;
   } catch (error) {
-    if (ownTransaction && !transaction.finished) {
-      await transaction.rollback();
-    }
     throw error;
   }
 }

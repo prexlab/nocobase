@@ -7,8 +7,13 @@
  * For more information, please refer to: https://www.nocobase.com/agreement.
  */
 
+import { FlowEngine } from '@nocobase/flow-engine';
+import { renderHook } from '@testing-library/react';
+import { ConfigProvider, theme } from 'antd';
+import React from 'react';
 import { buildCalendarSlotFormData } from '../actions/CalendarPopupModels';
 import { CalendarBlockModel } from '../CalendarBlockModel';
+import { PluginCalendarClient } from '../../plugin';
 
 describe('calendarPopupModels', () => {
   it('should expose preset field settings before creating a calendar block', () => {
@@ -156,6 +161,126 @@ describe('calendarPopupModels', () => {
     });
   });
 
+  it('should persist the color field selection before saving settings', () => {
+    const flow: any = (CalendarBlockModel as any).globalFlowRegistry.getFlow('calendarSettings');
+    const step = flow?.steps?.colorField;
+    const model = Object.create(CalendarBlockModel.prototype) as CalendarBlockModel;
+
+    Object.defineProperty(model, 'props', {
+      value: {
+        fieldNames: {
+          title: 'name',
+          start: 'startsAt',
+          end: 'endsAt',
+        },
+      },
+      writable: true,
+      configurable: true,
+    });
+    (model as any).setProps = function setProps(next: Record<string, unknown>) {
+      this.props = {
+        ...(this.props || {}),
+        ...next,
+      };
+    };
+
+    step.beforeParamsSave({ model } as any, { colorFieldName: 'status' });
+
+    expect(model.props.fieldNames).toEqual({
+      title: 'name',
+      start: 'startsAt',
+      end: 'endsAt',
+      colorFieldName: 'status',
+    });
+  });
+
+  it('should append associated title and color field paths when creating the resource', () => {
+    const flowEngine = new FlowEngine();
+    flowEngine.registerModels({ CalendarBlockModel });
+    flowEngine.dataSourceManager.getDataSource('main').addCollection({
+      name: 'calendar_events',
+      filterTargetKey: 'id',
+      fields: [
+        { name: 'id', type: 'integer', interface: 'integer' },
+        { name: 'startsAt', type: 'datetime', interface: 'datetime' },
+        { name: 'endsAt', type: 'datetime', interface: 'datetime' },
+        { name: 'owner', type: 'belongsTo', interface: 'm2o', target: 'users' },
+        { name: 'status', type: 'belongsTo', interface: 'm2o', target: 'statuses' },
+      ],
+    });
+
+    const model = flowEngine.createModel<CalendarBlockModel>({
+      use: 'CalendarBlockModel',
+      props: {
+        fieldNames: {
+          title: ['owner', 'nickname'],
+          start: 'startsAt',
+          end: 'endsAt',
+          colorFieldName: ['status', 'color'],
+        },
+      },
+      stepParams: {
+        resourceSettings: {
+          init: {
+            dataSourceKey: 'main',
+            collectionName: 'calendar_events',
+          },
+        },
+      },
+    });
+
+    expect(model.resource.getAppends()).toEqual(['owner', 'status']);
+  });
+
+  it('should resolve default color field background colors to concrete color values', () => {
+    const plugin = new PluginCalendarClient({} as any, {} as any);
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      React.createElement(ConfigProvider, { theme: { token: { blue: '#123456' } } }, children);
+    const { result } = renderHook(
+      () => {
+        const { token } = theme.useToken();
+        const selectColor = plugin.getColorFieldInterface('select').useGetColor(
+          {
+            interface: 'select',
+            uiSchema: {
+              enum: [
+                { label: 'Todo', value: 'todo', color: 'blue' },
+                { label: 'Done', value: 'done', color: '#52c41a' },
+                { label: 'Other', value: 'other', color: 'default' },
+              ],
+            },
+          },
+          { token },
+        );
+        const colorFieldColor = plugin.getColorFieldInterface('color').useGetColor(
+          {
+            interface: 'color',
+          },
+          { token },
+        );
+
+        return {
+          colorFieldColor,
+          selectColor,
+          token,
+        };
+      },
+      { wrapper },
+    );
+
+    expect(result.current.selectColor.getFontColor('todo')).toBe(result.current.token.blue7);
+    expect(result.current.selectColor.getBackgroundColor('todo')).toBe(result.current.token.blue1);
+    expect(result.current.selectColor.getBorderColor?.('todo')).toBe(result.current.token.blue3);
+    expect(result.current.selectColor.getFontColor('done')).toBe(result.current.token.colorTextLightSolid);
+    expect(result.current.selectColor.getBackgroundColor('done')).toBe('#52c41a');
+    expect(result.current.selectColor.getBorderColor?.('done')).toBe('transparent');
+    expect(result.current.selectColor.getFontColor('other')).toBeNull();
+    expect(result.current.selectColor.getBackgroundColor('other')).toBeNull();
+    expect(result.current.selectColor.getBorderColor?.('other')).toBeNull();
+    expect(result.current.colorFieldColor.getFontColor({ hex: '#fa541c' })).toBeNull();
+    expect(result.current.colorFieldColor.getBackgroundColor({ hex: '#fa541c' })).toBe('#fa541c');
+  });
+
   it('should hide quick create popup settings when quick create is disabled', () => {
     const flow: any = (CalendarBlockModel as any).globalFlowRegistry.getFlow('calendarSettings');
     const step = flow?.steps?.quickCreatePopupSettings;
@@ -165,6 +290,28 @@ describe('calendarPopupModels', () => {
     };
 
     expect(step?.hideInSettings?.({ model } as any)).toBe(true);
+  });
+
+  it('should persist popup actions only from popup settings save hooks', async () => {
+    const flow: any = (CalendarBlockModel as any).globalFlowRegistry.getFlow('calendarSettings');
+    const quickCreateStep = flow?.steps?.quickCreatePopupSettings;
+    const eventStep = flow?.steps?.eventPopupSettings;
+    const ensurePopupAction = vi.fn().mockResolvedValue({ uid: 'u_popup_action' });
+    const model = {
+      setPopupSettings: vi.fn(),
+      ensurePopupAction,
+    };
+
+    await quickCreateStep.handler({ model } as any, { mode: 'drawer' });
+    await eventStep.handler({ model } as any, { mode: 'dialog' });
+
+    expect(ensurePopupAction).not.toHaveBeenCalled();
+
+    await quickCreateStep.beforeParamsSave({ model } as any, { mode: 'drawer' });
+    await eventStep.beforeParamsSave({ model } as any, { mode: 'dialog' });
+
+    expect(ensurePopupAction).toHaveBeenCalledWith('quickCreateAction', { persist: true });
+    expect(ensurePopupAction).toHaveBeenCalledWith('eventViewAction', { persist: true });
   });
 
   it('should build quick-create formData from the selected slot', () => {
@@ -506,5 +653,250 @@ describe('calendarPopupModels', () => {
       collectionName: 'events',
       dataSourceKey: 'main',
     });
+  });
+
+  it('should keep popup collection context in add and event drawers', () => {
+    const model = Object.create(CalendarBlockModel.prototype) as CalendarBlockModel;
+    Object.defineProperty(model, 'collection', {
+      value: {
+        name: 'events',
+        dataSourceKey: 'main',
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'props', {
+      value: {},
+      configurable: true,
+    });
+
+    expect(model.getPopupSettings({ uid: 'quick-action' }, 'quickCreateAction')).toMatchObject({
+      uid: 'quick-action',
+      collectionName: 'events',
+      dataSourceKey: 'main',
+    });
+    expect(model.getPopupSettings({ uid: 'event-action' }, 'eventViewAction')).toMatchObject({
+      uid: 'event-action',
+      collectionName: 'events',
+      dataSourceKey: 'main',
+    });
+  });
+
+  it('should not persist hidden popup actions while opening calendar popups', async () => {
+    const save = vi.fn();
+    const saveStepParams = vi.fn();
+    const action = {
+      uid: 'u_event_popup',
+      getStepParams: vi.fn(() => ({})),
+      setStepParams: vi.fn(),
+      save,
+      saveStepParams,
+    };
+    const model = Object.create(CalendarBlockModel.prototype) as CalendarBlockModel;
+    Object.defineProperty(model, 'subModels', {
+      value: {
+        eventViewAction: action,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'collection', {
+      value: {
+        name: 'events',
+        dataSourceKey: 'main',
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'context', {
+      value: {
+        flowSettingsEnabled: true,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'props', {
+      value: {},
+      configurable: true,
+    });
+
+    await model.ensurePopupAction('eventViewAction');
+
+    expect(save).not.toHaveBeenCalled();
+    expect(saveStepParams).not.toHaveBeenCalled();
+    expect(action.setStepParams).toHaveBeenCalledWith('popupSettings', 'openView', {
+      mode: 'drawer',
+      size: 'medium',
+      pageModelClass: 'ChildPageModel',
+      uid: 'u_event_popup',
+      collectionName: 'events',
+      dataSourceKey: 'main',
+    });
+  });
+
+  it('should persist hidden popup actions only when calendar popup settings are saved', async () => {
+    const save = vi.fn();
+    const saveStepParams = vi.fn();
+    const action = {
+      uid: 'u_event_popup',
+      getStepParams: vi.fn(() => ({})),
+      setStepParams: vi.fn(),
+      save,
+      saveStepParams,
+    };
+    const model = Object.create(CalendarBlockModel.prototype) as CalendarBlockModel;
+    Object.defineProperty(model, 'subModels', {
+      value: {
+        eventViewAction: action,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'collection', {
+      value: {
+        name: 'events',
+        dataSourceKey: 'main',
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'context', {
+      value: {
+        flowSettingsEnabled: true,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'props', {
+      value: {},
+      configurable: true,
+    });
+
+    await model.ensurePopupAction('eventViewAction', { persist: true });
+
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(saveStepParams).toHaveBeenCalledTimes(1);
+  });
+
+  it('should keep legacy calendar popup action uid usable when popup settings are saved', async () => {
+    const destroy = vi.fn();
+    const action = {
+      uid: 'calendar-block-eventViewAction',
+      getStepParams: vi.fn(() => ({})),
+      setStepParams: vi.fn(),
+      clone: vi.fn(),
+      save: vi.fn(),
+      saveStepParams: vi.fn(),
+      destroy,
+    };
+    const model = Object.create(CalendarBlockModel.prototype) as CalendarBlockModel;
+    Object.defineProperty(model, 'subModels', {
+      value: {
+        eventViewAction: action,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'collection', {
+      value: {
+        name: 'events',
+        dataSourceKey: 'main',
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'context', {
+      value: {
+        flowSettingsEnabled: true,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'props', {
+      value: {},
+      configurable: true,
+    });
+    model.setSubModel = vi.fn(function (this: any, key, value) {
+      this.subModels[key] = value;
+      return value;
+    }) as any;
+
+    await model.ensurePopupAction('eventViewAction');
+
+    expect(action.clone).not.toHaveBeenCalled();
+    expect(model.subModels.eventViewAction).toBe(action);
+    expect(action.save).not.toHaveBeenCalled();
+    expect(action.saveStepParams).not.toHaveBeenCalled();
+    expect(destroy).not.toHaveBeenCalled();
+
+    await model.ensurePopupAction('eventViewAction', { persist: true });
+
+    expect(action.clone).not.toHaveBeenCalled();
+    expect(model.subModels.eventViewAction).toBe(action);
+    expect(action.save).toHaveBeenCalledTimes(1);
+    expect(action.saveStepParams).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+  });
+
+  it('should open quick-create drawer through flow context openView with selected slot data', async () => {
+    const openView = vi.fn().mockResolvedValue(undefined);
+    const ensurePopupAction = vi.fn().mockResolvedValue({ uid: 'u_quick_create_popup' });
+    const slotInfo = {
+      start: new Date(2026, 3, 20, 9, 30, 0),
+      end: new Date(2026, 3, 20, 10, 30, 0),
+    };
+
+    await CalendarBlockModel.prototype.openQuickCreate.call(
+      {
+        props: {},
+        context: {
+          openView,
+          layoutContentElement: { id: 'layout-root' },
+        },
+        collection: {
+          name: 'events',
+          dataSourceKey: 'main',
+          getField: () => ({
+            getComponentProps: () => ({ picker: 'date', showTime: true }),
+          }),
+        },
+        ensurePopupAction,
+        getFieldNames: () => ({ start: 'startsAt', end: 'endsAt' }),
+      } as any,
+      slotInfo,
+    );
+
+    expect(ensurePopupAction).toHaveBeenCalledWith('quickCreateAction');
+    expect(openView).toHaveBeenCalledWith('u_quick_create_popup', {
+      formData: {
+        startsAt: '2026-04-20 09:30:00',
+        endsAt: '2026-04-20 10:30:00',
+      },
+      dataSourceKey: 'main',
+      collectionName: 'events',
+      target: { id: 'layout-root' },
+    });
+    expect(openView.mock.calls[0][0]).not.toContain('quickCreateAction');
+  });
+
+  it('should open event drawer through flow context openView with record filter key', async () => {
+    const openView = vi.fn().mockResolvedValue(undefined);
+    const ensurePopupAction = vi.fn().mockResolvedValue({ uid: 'u_event_view_popup' });
+
+    await CalendarBlockModel.prototype.openEvent.call(
+      {
+        context: {
+          openView,
+          layoutContentElement: { id: 'layout-root' },
+        },
+        collection: {
+          name: 'events',
+          dataSourceKey: 'main',
+          filterTargetKey: 'id',
+          getFilterByTK: (record: any) => record.id,
+        },
+        ensurePopupAction,
+      } as any,
+      { id: 7 },
+    );
+
+    expect(ensurePopupAction).toHaveBeenCalledWith('eventViewAction');
+    expect(openView).toHaveBeenCalledWith('u_event_view_popup', {
+      dataSourceKey: 'main',
+      collectionName: 'events',
+      filterByTk: 7,
+      target: { id: 'layout-root' },
+    });
+    expect(openView.mock.calls[0][0]).not.toContain('eventViewAction');
   });
 });

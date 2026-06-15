@@ -21,6 +21,7 @@ import { resolveLocalizedText } from '../lib/cli-locale.js';
 import { runPromptCatalog } from '../lib/prompt-catalog.js';
 import {
   findAvailableTcpPort,
+  validateAppPublicPath,
   validateApiBaseUrl,
   validateAvailableTcpPort,
   validateTcpPort,
@@ -102,6 +103,41 @@ test('validateApiBaseUrl rejects malformed URLs and unsupported schemes', async 
   );
 });
 
+test('validateApiBaseUrl rejects URLs that do not include the api prefix', async () => {
+  await expect(validateApiBaseUrl('http://localhost:13000')).resolves.toMatch(/must include the \/api prefix/i);
+  await expect(validateApiBaseUrl('https://demo.example.com/nocobase')).resolves.toMatch(
+    /must include the \/api prefix/i,
+  );
+});
+
+test('validateApiBaseUrl accepts supported api base url shapes with optional public path prefixes', async () => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+    status: 200,
+    json: vi.fn(),
+  } as any);
+
+  await expect(validateApiBaseUrl('https://demo.example.com/nocobase/api')).resolves.toBe(undefined);
+  await expect(validateApiBaseUrl('https://demo.example.com/nocobase/api/__app/mobile')).resolves.toBe(undefined);
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    'https://demo.example.com/nocobase/api/__health_check',
+    expect.objectContaining({ method: 'GET' }),
+  );
+  expect(fetchMock).toHaveBeenCalledWith(
+    'https://demo.example.com/nocobase/api/__app/mobile/__health_check',
+    expect.objectContaining({ method: 'GET' }),
+  );
+});
+
+test('validateApiBaseUrl rejects unsupported paths that only contain api as a middle segment', async () => {
+  await expect(validateApiBaseUrl('https://demo.example.com/foo/api/bar')).resolves.toMatch(
+    /must include the \/api prefix/i,
+  );
+  await expect(validateApiBaseUrl('https://demo.example.com/api/foo')).resolves.toMatch(
+    /must include the \/api prefix/i,
+  );
+});
+
 test('validateApiBaseUrl rejects URLs that already include the health check path', async () => {
   await expect(validateApiBaseUrl('http://localhost:13000/api/__health_check')).resolves.toMatch(
     /Do not include \/__health_check/i,
@@ -149,6 +185,22 @@ test('validateApiBaseUrl reports connectivity failures', async () => {
 test('validateEnvKey allows only letters and numbers', () => {
   expect(validateEnvKey('local01')).toBe(undefined);
   expect(validateEnvKey('local-dev') ?? '').toMatch(/letters and numbers only/i);
+});
+
+test('validateAppPublicPath accepts root and slash-separated slug paths', () => {
+  expect(validateAppPublicPath('/')).toBe(undefined);
+  expect(validateAppPublicPath('/nocobase/')).toBe(undefined);
+  expect(validateAppPublicPath('/admin_console/')).toBe(undefined);
+  expect(validateAppPublicPath('/foo-bar/baz_2/')).toBe(undefined);
+  expect(validateAppPublicPath('/foo-bar/baz_2')).toBe(undefined);
+});
+
+test('validateAppPublicPath rejects invalid path formats', () => {
+  expect(validateAppPublicPath('nocobase') ?? '').toMatch(/slash-separated path/i);
+  expect(validateAppPublicPath('/中文/') ?? '').toMatch(/slash-separated path/i);
+  expect(validateAppPublicPath('/foo bar/') ?? '').toMatch(/slash-separated path/i);
+  expect(validateAppPublicPath('/foo.bar/') ?? '').toMatch(/slash-separated path/i);
+  expect(validateAppPublicPath('/foo//bar/') ?? '').toMatch(/slash-separated path/i);
 });
 
 test('validateAvailableTcpPort rejects invalid and occupied ports across local bind hosts', async () => {
@@ -361,6 +413,8 @@ test('init --yes --env validates global env name uniqueness through preset value
 
 test('install prompts expose the expected defaults and validators', () => {
   const envPrompt = Install.envPrompts.env;
+  const langPrompt = Install.appPrompts.lang;
+  const appPathPrompt = Install.appPrompts.appPath;
   const appPortPrompt = Install.appPrompts.appPort;
   const builtinDbPrompt = Install.dbPrompts.builtinDb;
   const dbDialectPrompt = Install.dbPrompts.dbDialect;
@@ -383,6 +437,16 @@ test('install prompts expose the expected defaults and validators', () => {
   expect(envPrompt.yesInitialValue).toBe(undefined);
   expect(typeof envPrompt.validate).toBe('function');
   expect(envPrompt.validate?.('local-dev', {}) ?? '').toMatch(/letters and numbers only/i);
+
+  expect(langPrompt.type).toBe('select');
+  expect(resolveLocalizedText(langPrompt.message, { locale: 'en-US' })).toBe(
+    'Which language would you like to use for the app?',
+  );
+
+  expect(appPathPrompt.type).toBe('text');
+  expect(resolveLocalizedText(appPathPrompt.message, { locale: 'en-US' })).toContain(
+    process.env.NB_CLI_ROOT ?? os.homedir(),
+  );
 
   expect(appPortPrompt.type).toBe('text');
   expect(appPortPrompt.initialValue).toBe(undefined);
@@ -667,13 +731,13 @@ test('version prompt uses presets and reveals otherVersion when needed', () => {
 
   expect(versionPrompt.type).toBe('select');
   expect(versionPrompt.variant).toBe('radio');
-  expect(versionPrompt.initialValue).toBe('beta');
-  expect(versionPrompt.yesInitialValue).toBe('beta');
+  expect(versionPrompt.initialValue).toBe('latest');
+  expect(versionPrompt.yesInitialValue).toBe('latest');
   expect(
     versionPrompt.options[0] && typeof versionPrompt.options[0] !== 'string'
       ? versionPrompt.options[0].disabled
       : undefined,
-  ).toBe(true);
+  ).toBeUndefined();
   expect(
     resolveLocalizedText(
       versionPrompt.options?.[0] && typeof versionPrompt.options[0] !== 'string'

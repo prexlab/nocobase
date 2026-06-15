@@ -53,6 +53,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '../../locale';
 import { PluginDataSourceManagerClientV2 } from '../../plugin';
 import { compileLegacyTemplate, compileLegacyTemplateText } from '../../utils/compileLegacyTemplate';
+import { getErrorMessage, isFormValidationError } from '../../utils/error';
 import { getCollectionFieldActionUrl } from './collectionFieldApi';
 import {
   filterCreateFieldInterfacesByCollectionTemplate,
@@ -119,23 +120,6 @@ function normalizeListResponse(response: any) {
   return Array.isArray(payload?.data) ? payload.data : [];
 }
 
-function isFormValidationError(error: unknown) {
-  return Array.isArray((error as { errorFields?: unknown[] })?.errorFields);
-}
-
-function getSubmitErrorMessage(error: unknown, fallback: string) {
-  const errors = get(error, 'response.data.errors') as Array<{ message?: string }> | undefined;
-  const message =
-    errors
-      ?.map((item) => item.message)
-      .filter(Boolean)
-      .join('\n') ||
-    get(error, 'response.data.message') ||
-    get(error, 'message');
-
-  return typeof message === 'string' && message ? message : fallback;
-}
-
 function toNamePath(name: string) {
   return name.split('.');
 }
@@ -148,6 +132,7 @@ const relationCollectionPropertyNames = new Set(['target']);
 const fileCollectionEnum = '{{fileCollections}}';
 const sourceKeyPropertyNames = new Set(['sourceKey']);
 const targetKeyPropertyNames = new Set(['targetKey']);
+const validationConfigureItemName = 'validation';
 const optionColorLabels: Record<string, string> = {
   red: 'Red',
   magenta: 'Magenta',
@@ -189,6 +174,22 @@ const REQUIRED_RULE_KEY = 'required';
 type SortableOptionRowProps = React.HTMLAttributes<HTMLTableRowElement> & {
   'data-row-key': string;
 };
+
+function splitValidationConfigureItems(
+  items: FieldConfigureItem[],
+  enabled: boolean,
+): { mainConfigureItems: FieldConfigureItem[]; validationConfigureItems: FieldConfigureItem[] } {
+  if (!enabled) {
+    return {
+      mainConfigureItems: items,
+      validationConfigureItems: [],
+    };
+  }
+  return {
+    mainConfigureItems: items.filter((item) => item.name !== validationConfigureItemName),
+    validationConfigureItems: items.filter((item) => item.name === validationConfigureItemName),
+  };
+}
 
 const SortableOptionRowContext = React.createContext<{
   attributes?: DraggableAttributes;
@@ -1705,6 +1706,10 @@ export function FieldForm(props: FieldFormProps) {
   const fieldInterfaceTitleText = compileLegacyTemplateText(fieldInterfaceOptions?.title || interfaceName || '-', t);
   const ConfigureForm = configure?.ConfigureForm || configure?.Component;
   const fieldConfigureItems = useMemo(() => configure?.items || [], [configure?.items]);
+  const { mainConfigureItems, validationConfigureItems } = useMemo(
+    () => splitValidationConfigureItems(fieldConfigureItems, !!fieldInterfaceOptions?.isAssociation),
+    [fieldConfigureItems, fieldInterfaceOptions?.isAssociation],
+  );
   const [collections, setCollections] = useState<Array<Record<string, any>>>([]);
   const needsCollectionOptions = useMemo(
     () =>
@@ -1977,7 +1982,7 @@ export function FieldForm(props: FieldFormProps) {
     } catch (error) {
       if (!isFormValidationError(error)) {
         notification.error({
-          message: getSubmitErrorMessage(error, t('Submit failed')),
+          message: getErrorMessage(error, t('Submit failed')),
         });
       }
       throw error;
@@ -2056,7 +2061,7 @@ export function FieldForm(props: FieldFormProps) {
           <Input autoComplete="off" disabled={props.mode === 'edit' || interfaceName === 'tableoid'} />
         </Form.Item>
         <FieldConfigureItemsRenderer
-          items={fieldConfigureItems}
+          items={mainConfigureItems}
           collection={props.collection}
           collections={collections}
           fieldInterface={fieldInterfaceOptions}
@@ -2079,6 +2084,14 @@ export function FieldForm(props: FieldFormProps) {
             disabledJSONB={props.mode === 'edit'}
           />
         ) : null}
+        <FieldConfigureItemsRenderer
+          items={validationConfigureItems}
+          collection={props.collection}
+          collections={collections}
+          fieldInterface={fieldInterfaceOptions}
+          form={form}
+          context={fieldConfigureContext}
+        />
         <Form.Item name="description" label={t('Description')}>
           <Input.TextArea autoSize={{ minRows: 4, maxRows: 8 }} />
         </Form.Item>

@@ -56,6 +56,10 @@ type GanttScrollToDateOptions = {
   behavior?: ScrollBehavior;
 };
 
+type GanttPopupActionOptions = {
+  persist?: boolean;
+};
+
 export class GanttBlockModel extends TableBlockModel {
   static scene = BlockSceneEnum.many;
 
@@ -160,6 +164,13 @@ export class GanttBlockModel extends TableBlockModel {
     return (
       (this.props?.defaultExpandAllRows ??
         this.getStepParams('tableSettings', 'defaultExpandAllRows')?.defaultExpandAllRows) === true
+    );
+  }
+
+  shouldScrollToTodayOnFirstRender() {
+    return (
+      (this.props?.scrollToTodayOnFirstRender ??
+        this.getStepParams('ganttSettings', 'scrollToTodayOnFirstRender')?.scrollToTodayOnFirstRender) === true
     );
   }
 
@@ -359,10 +370,6 @@ export class GanttBlockModel extends TableBlockModel {
     return (this.subModels as GanttBlockStructure['subModels'])?.eventViewAction as any;
   }
 
-  getPopupActionUid(actionKey: 'eventViewAction') {
-    return `${this.uid}-${actionKey}`;
-  }
-
   getPopupSettingsDefaults(actionUid?: string) {
     return {
       mode: normalizeEventOpenMode(this.props?.eventOpenMode),
@@ -421,7 +428,7 @@ export class GanttBlockModel extends TableBlockModel {
     };
   }
 
-  async syncPopupActionSettings(action: any) {
+  async syncPopupActionSettings(action: any, options: GanttPopupActionOptions = {}) {
     if (!action) {
       return;
     }
@@ -434,21 +441,20 @@ export class GanttBlockModel extends TableBlockModel {
 
     action.setStepParams('popupSettings', 'openView', nextSettings);
 
-    if (this.context.flowSettingsEnabled && action?.saveStepParams) {
+    if (options.persist && this.context.flowSettingsEnabled && action?.saveStepParams) {
       await action.saveStepParams();
     }
   }
 
   async loadPopupAction(actionKey: 'eventViewAction') {
-    const actionUid = this.getPopupActionUid(actionKey);
     try {
-      return this.flowEngine.getModel(actionUid) || (await this.flowEngine.loadModel({ uid: actionUid }));
+      return await this.flowEngine.loadModel({ parentId: this.uid, subKey: actionKey });
     } catch (error) {
       return null;
     }
   }
 
-  async ensurePopupAction(actionKey: 'eventViewAction' = 'eventViewAction') {
+  async ensurePopupAction(actionKey: 'eventViewAction' = 'eventViewAction', options: GanttPopupActionOptions = {}) {
     let action = (this.subModels as GanttBlockStructure['subModels'])?.[actionKey] as any;
 
     if (!action) {
@@ -457,17 +463,17 @@ export class GanttBlockModel extends TableBlockModel {
       if (loadedAction) {
         this.setSubModel(actionKey, loadedAction);
       } else {
-        this.setSubModel(actionKey, createGanttEventViewActionOptions(this.getPopupActionUid(actionKey)));
+        this.setSubModel(actionKey, createGanttEventViewActionOptions());
       }
 
       action = (this.subModels as GanttBlockStructure['subModels'])?.[actionKey] as any;
     }
 
-    if (this.context.flowSettingsEnabled && action?.save) {
+    if (options.persist && this.context.flowSettingsEnabled && action?.save) {
       await action.save();
     }
 
-    await this.syncPopupActionSettings(action);
+    await this.syncPopupActionSettings(action, options);
 
     return action;
   }
@@ -482,14 +488,19 @@ export class GanttBlockModel extends TableBlockModel {
     if (!filterByTk) {
       return;
     }
+    const inputArgs = {
+      ...(this.collection?.dataSourceKey ? { dataSourceKey: this.collection.dataSourceKey } : {}),
+      ...(this.collection?.name ? { collectionName: this.collection.name } : {}),
+      filterByTk,
+      target: this.context?.layoutContentElement,
+    };
 
-    await action.dispatchEvent(
-      'click',
-      {
-        filterByTk,
-      },
-      { debounce: true },
-    );
+    if (typeof this.context?.openView === 'function' && action.uid) {
+      await this.context.openView(action.uid, inputArgs);
+      return;
+    }
+
+    await action.dispatchEvent('click', inputArgs, { debounce: true });
   }
 
   getActionsColumn() {

@@ -270,6 +270,7 @@ export function normalizeFlowSurfacePublicBlockDefaultFilter(
   const normalized = normalizeFlowSurfaceFilterGroupValue(
     defaultFilter,
     `flowSurfaces ${actionName} ${fieldPath} expects FilterGroup like ${FLOW_SURFACE_FILTER_GROUP_EXAMPLE}`,
+    { strictDateValues: true },
   );
   return normalized;
 }
@@ -315,9 +316,7 @@ export function backfillFlowSurfaceDefaultFilterSetting(settings: any, defaultFi
   if (_.isUndefined(defaultFilter)) {
     return settings;
   }
-  const filterableFieldNames = resolveFlowSurfaceDefaultFilterFieldNames(defaultFilter);
   const defaults = {
-    ...(filterableFieldNames.length ? { filterableFieldNames } : {}),
     defaultFilter: _.cloneDeep(defaultFilter),
   };
   if (_.isUndefined(settings)) {
@@ -327,16 +326,6 @@ export function backfillFlowSurfaceDefaultFilterSetting(settings: any, defaultFi
     return settings;
   }
   if (Object.prototype.hasOwnProperty.call(settings, 'defaultFilter')) {
-    const explicitFilterableFieldNames = resolveFlowSurfaceDefaultFilterFieldNames(settings.defaultFilter);
-    if (
-      !Object.prototype.hasOwnProperty.call(settings, 'filterableFieldNames') &&
-      explicitFilterableFieldNames.length
-    ) {
-      return {
-        ..._.cloneDeep(settings),
-        filterableFieldNames: explicitFilterableFieldNames,
-      };
-    }
     return settings;
   }
   return {

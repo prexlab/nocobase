@@ -193,6 +193,50 @@ test('runPromptCatalogWebUI resolves after submit even when the browser keeps a 
   }
 });
 
+test('buildWebFormValuesFromCatalog resolves function defaults for password fields', async () => {
+  const { buildWebFormValuesFromCatalog } = await import('../lib/prompt-web-ui.js');
+
+  const values = buildWebFormValuesFromCatalog({
+    rootPassword: {
+      type: 'password',
+      message: 'Root password',
+      required: true,
+    },
+    authType: {
+      type: 'select',
+      message: 'Authentication type',
+      options: ['basic', 'oauth'],
+      initialValue: 'basic',
+      required: true,
+    },
+    installPassword: {
+      type: 'password',
+      message: 'Install password',
+      required: true,
+      hidden: (currentValues) => currentValues.authType !== 'basic',
+      initialValue: (currentValues) => String(currentValues.rootPassword ?? ''),
+    },
+  }, {
+    rootPassword: 'admin123',
+  });
+
+  expect(values.installPassword).toBe('admin123');
+});
+
+test('buildWebFormValuesFromCatalog resolves text defaults for app public path fields', async () => {
+  const { buildWebFormValuesFromCatalog } = await import('../lib/prompt-web-ui.js');
+
+  const values = buildWebFormValuesFromCatalog({
+    appPublicPath: {
+      type: 'text',
+      message: 'App public path',
+      initialValue: '/',
+    },
+  });
+
+  expect(values.appPublicPath).toBe('/');
+});
+
 test('web UI renders a password visibility toggle next to the validation suffix for password fields', async () => {
   const { runPromptCatalogWebUI } = await import('../lib/prompt-web-ui.js');
 
@@ -504,7 +548,7 @@ test('reflow returns default values for fields that become visible later', async
   }
 });
 
-test('web UI renders disabled radio options for unavailable version presets', async () => {
+test('web UI renders enabled radio options for version presets', async () => {
   const { runPromptCatalogWebUI } = await import('../lib/prompt-web-ui.js');
   const { default: Download } = await import('../commands/source/download.js');
 
@@ -541,8 +585,9 @@ test('web UI renders disabled radio options for unavailable version presets', as
 
     const page = await requestWithAgent(uiUrl, { agent });
     expect(page.statusCode).toBe(200);
-    expect(page.body).toMatch(/name="version" type="radio" value="latest"[^>]*disabled/);
-    expect(page.body).toMatch(/name="version" type="radio" value="latest"[^>]*data-pwc-static-disabled="1"/);
+    expect(page.body).toMatch(/name="version" type="radio" value="latest"/);
+    expect(page.body).not.toMatch(/name="version" type="radio" value="latest"[^>]*disabled/);
+    expect(page.body).not.toMatch(/name="version" type="radio" value="latest"[^>]*data-pwc-static-disabled="1"/);
 
     const reflowUrl = new URL('/__pwc_ui_reflow', uiUrl).toString();
     const reflow = await requestWithAgent(reflowUrl, {
@@ -586,8 +631,8 @@ test('reflow reveals otherVersion and recomputes outputDir from the final versio
     source: 'git',
   });
   expect(presetState.show.otherVersion).toBe(false);
-  expect(presetState.values.version).toBe('beta');
-  expect(presetState.values.outputDir).toBe('./nocobase-beta');
+  expect(presetState.values.version).toBe('latest');
+  expect(presetState.values.outputDir).toBe('./nocobase-latest');
 
   const otherState = reflowWebFormState(Download.prompts, {
     source: 'git',
@@ -644,10 +689,8 @@ test('reflow recomputes init app paths from the current app name', async () => {
     appName: 'demoapp',
   });
 
-  expect(state.show.appRootPath).toBe(true);
-  expect(state.show.storagePath).toBe(true);
-  expect(state.values.appRootPath).toBe('./demoapp/source/');
-  expect(state.values.storagePath).toBe('./demoapp/storage/');
+  expect(state.show.appPath).toBe(true);
+  expect(state.values.appPath).toBe('./demoapp/');
 });
 
 test('reflow recomputes the built-in database image from the current database dialect until the field is edited', async () => {

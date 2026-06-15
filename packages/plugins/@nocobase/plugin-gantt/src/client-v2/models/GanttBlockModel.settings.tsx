@@ -455,19 +455,38 @@ export function registerGanttBlockModelSettings(GanttBlockModel: any) {
           getGanttModel(ctx).setProps('enableDragToReschedule', params.enableDragToReschedule !== false);
         },
       },
+      scrollToTodayOnFirstRender: {
+        title: tExpr('Scroll to today on first display'),
+        uiMode: { type: 'switch', key: 'scrollToTodayOnFirstRender' },
+        defaultParams(ctx) {
+          const model = getGanttModel(ctx);
+          return {
+            scrollToTodayOnFirstRender: model.shouldScrollToTodayOnFirstRender(),
+          };
+        },
+        handler(ctx, params) {
+          getGanttModel(ctx).setProps('scrollToTodayOnFirstRender', params.scrollToTodayOnFirstRender === true);
+        },
+        beforeParamsSave(ctx, params) {
+          getGanttModel(ctx).setProps('scrollToTodayOnFirstRender', params.scrollToTodayOnFirstRender === true);
+        },
+      },
       eventPopupSettings: {
         use: 'openView',
         title: tExpr('Event popup settings'),
         async defaultParams(ctx) {
           const model = getGanttModel(ctx);
           const action = await model.ensurePopupAction('eventViewAction');
-          return model.getPopupSettings(action, model.getPopupActionUid('eventViewAction'));
+          return model.getPopupSettings(action, action?.uid);
         },
         async handler(ctx, params) {
           const model = getGanttModel(ctx);
           model.setPopupSettings(params);
-          const action = await model.ensurePopupAction('eventViewAction');
-          await model.syncPopupActionSettings(action);
+        },
+        async beforeParamsSave(ctx, params) {
+          const model = getGanttModel(ctx);
+          model.setPopupSettings(params);
+          await model.ensurePopupAction('eventViewAction', { persist: true });
         },
       },
     },
@@ -491,6 +510,7 @@ export function registerGanttBlockModelSettings(GanttBlockModel: any) {
       use: 'GanttBlockModel',
       props: {
         enableDragToReschedule: true,
+        scrollToTodayOnFirstRender: false,
         showTable: true,
       },
       subModels: {

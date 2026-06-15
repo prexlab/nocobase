@@ -35,6 +35,11 @@ const LARGE_GENERATED_POPUP_UNSUPPORTED_COLLECTION = 'flow_surface_large_generat
 const LARGE_GENERATED_POPUP_CODE_COLLECTION = 'flow_surface_large_generated_popup_code';
 const GENERATED_POPUP_TEN_EFFECTIVE_COLLECTION = 'flow_surface_ten_effective_generated_popup';
 const GENERATED_POPUP_TEN_EFFECTIVE_FIELDS = Array.from({ length: 10 }, (_item, index) => `field${index + 1}`);
+const GENERATED_POPUP_RELATION_BACKING_FK_TARGET_COLLECTION = 'flow_surface_relation_backing_fk_targets';
+const GENERATED_POPUP_RELATION_BACKING_FK_COLLECTION = 'flow_surface_relation_backing_fk_sources';
+const GENERATED_POPUP_RELATION_BACKING_FK_FIELDS = Array.from({ length: 9 }, (_item, index) => `field${index + 1}`);
+const GENERATED_POPUP_RELATION_BACKING_FK_FIELD = 'customer';
+const GENERATED_POPUP_RELATION_BACKING_FK_NAME = 'customer_id';
 const DESCRIPTION_FORM_BEHAVIOR_COLLECTION = 'flow_surface_description_form_behavior';
 const DESCRIPTION_FORM_BEHAVIOR_IGNORED_COLLECTION = 'flow_surface_description_form_behavior_ignored';
 const DESCRIPTION_FORM_BEHAVIOR_FIELD_GROUP_COLLECTION = 'flow_surface_description_form_behavior_field_group';
@@ -208,6 +213,47 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
     });
     await rootAgent.resource('collections').create({
       values: {
+        name: GENERATED_POPUP_RELATION_BACKING_FK_TARGET_COLLECTION,
+        title: 'Flow surface relation backing FK targets',
+        titleField: 'name',
+        fields: [
+          {
+            name: 'name',
+            type: 'string',
+            interface: 'input',
+          },
+        ],
+      },
+    });
+    await rootAgent.resource('collections').create({
+      values: {
+        name: GENERATED_POPUP_RELATION_BACKING_FK_COLLECTION,
+        title: 'Flow surface relation backing FK sources',
+        fields: [
+          ...GENERATED_POPUP_RELATION_BACKING_FK_FIELDS.map((name) => ({
+            name,
+            type: 'string',
+            interface: 'input',
+          })),
+          {
+            name: GENERATED_POPUP_RELATION_BACKING_FK_NAME,
+            type: 'integer',
+            interface: 'integer',
+          },
+        ],
+      },
+    });
+    await rootAgent.resource('collections.fields', GENERATED_POPUP_RELATION_BACKING_FK_COLLECTION).create({
+      values: {
+        name: GENERATED_POPUP_RELATION_BACKING_FK_FIELD,
+        type: 'belongsTo',
+        target: GENERATED_POPUP_RELATION_BACKING_FK_TARGET_COLLECTION,
+        foreignKey: GENERATED_POPUP_RELATION_BACKING_FK_NAME,
+        interface: 'm2o',
+      },
+    });
+    await rootAgent.resource('collections').create({
+      values: {
         name: DESCRIPTION_FORM_BEHAVIOR_COLLECTION,
         title: 'Flow surface description form behavior',
         fields: [
@@ -341,6 +387,11 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
       [LARGE_GENERATED_POPUP_UNSUPPORTED_COLLECTION]: LARGE_GENERATED_POPUP_UNSUPPORTED_FIELDS,
       [LARGE_GENERATED_POPUP_CODE_COLLECTION]: LARGE_GENERATED_POPUP_CODE_FIELDS,
       [GENERATED_POPUP_TEN_EFFECTIVE_COLLECTION]: [...GENERATED_POPUP_TEN_EFFECTIVE_FIELDS, 'internalSort'],
+      [GENERATED_POPUP_RELATION_BACKING_FK_TARGET_COLLECTION]: ['name'],
+      [GENERATED_POPUP_RELATION_BACKING_FK_COLLECTION]: [
+        ...GENERATED_POPUP_RELATION_BACKING_FK_FIELDS,
+        GENERATED_POPUP_RELATION_BACKING_FK_NAME,
+      ],
       [DESCRIPTION_FORM_BEHAVIOR_COLLECTION]: ['title', 'notes'],
       [DESCRIPTION_FORM_BEHAVIOR_IGNORED_COLLECTION]: ['title', 'internalNotes'],
       [DESCRIPTION_FORM_BEHAVIOR_FIELD_GROUP_COLLECTION]: DESCRIPTION_FORM_BEHAVIOR_FIELD_GROUP_FIELDS,
@@ -844,6 +895,13 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
     );
     errors.forEach((error: any) => {
       expect(error.message).toContain('settings.code');
+      expect(error.details).toEqual(
+        expect.objectContaining({
+          requiredBlockType: 'jsBlock',
+          fixStrategy: 'repair_same_block_type',
+          agentInstruction: expect.stringContaining('fix every listed error'),
+        }),
+      );
     });
   });
 
@@ -961,6 +1019,7 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
         'render-unreachable-render-call',
         'blocked-global-stop',
         'ctx-root-mismatch-stop',
+        'unknown-global-stop',
       ]),
     );
     errors.forEach((error: any) => {
@@ -972,7 +1031,7 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
           suggestedAction: expect.any(String),
           skipForbidden: true,
           mustRetry: true,
-          agentInstruction: expect.any(String),
+          agentInstruction: expect.stringContaining('fix every listed error'),
           line: expect.any(Number),
           column: expect.any(Number),
         }),
@@ -2588,6 +2647,128 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
     );
   });
 
+  it('should reject builder chart assets that count relation subfields', async () => {
+    const employerGroupsCollection = {
+      dataSourceKey: 'main',
+      name: 'employer_groups',
+      getFields: () => [
+        {
+          name: 'title',
+          type: 'string',
+          interface: 'input',
+        },
+      ],
+      getField: (name: string) =>
+        name === 'title'
+          ? {
+              name: 'title',
+              type: 'string',
+              interface: 'input',
+            }
+          : null,
+    };
+    const claimsCollection = {
+      dataSourceKey: 'main',
+      name: 'claims',
+      getField: (name: string) => {
+        if (name === 'id') {
+          return {
+            name: 'id',
+            type: 'bigInt',
+            interface: 'id',
+          };
+        }
+        if (name === 'employer_group') {
+          return {
+            name: 'employer_group',
+            type: 'belongsTo',
+            interface: 'm2o',
+            target: 'employer_groups',
+            targetCollection: employerGroupsCollection,
+            isAssociationField: () => true,
+          };
+        }
+        return null;
+      },
+    };
+
+    const errors = await collectFlowSurfaceAuthoringErrors(
+      'applyBlueprint',
+      {
+        mode: 'create',
+        navigation: {
+          item: {
+            title: 'Invalid relation count chart',
+          },
+        },
+        assets: {
+          charts: {
+            employerGroupChart: {
+              query: {
+                mode: 'builder',
+                resource: {
+                  dataSourceKey: 'main',
+                  collectionName: 'claims',
+                },
+                measures: [{ field: 'employer_group.title', aggregation: 'count', alias: 'claimCount' }],
+                dimensions: [{ field: 'employer_group.title' }],
+              },
+              visual: {
+                mode: 'basic',
+                type: 'bar',
+                mappings: {
+                  x: 'employer_group.title',
+                  y: 'claimCount',
+                },
+              },
+            },
+          },
+        },
+        tabs: [
+          {
+            title: 'Overview',
+            blocks: [
+              {
+                key: 'employerGroupChart',
+                type: 'chart',
+                chart: 'employerGroupChart',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        getCollection: (_dataSourceKey, collectionName) =>
+          collectionName === 'claims'
+            ? claimsCollection
+            : collectionName === 'employer_groups'
+              ? employerGroupsCollection
+              : null,
+      },
+    );
+
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: '$.assets.charts.employerGroupChart.query.measures[0].field',
+          ruleId: 'chart-builder-query-count-measure-relation-subfield',
+          message: expect.stringContaining("counts relation subfield 'employer_group.title'"),
+          details: expect.objectContaining({
+            fieldPath: 'employer_group.title',
+            suggestedMeasure: {
+              field: 'id',
+              aggregation: 'count',
+              alias: 'claimCount',
+            },
+            suggestedDimension: {
+              field: 'employer_group.title',
+            },
+          }),
+        }),
+      ]),
+    );
+  });
+
   it('should validate configure popup and hidden popup RunJS recursively', async () => {
     const errors = await collectFlowSurfaceAuthoringErrors(
       'configure',
@@ -2652,6 +2833,39 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
         modelUse: 'JSBlockModel',
       }),
     ).toEqual([]);
+
+    const collectionRefreshRequestErrors = inspectRunJsAuthoringCode({
+      code: "ctx.render(null);\nawait ctx.api.request({ url: 'collection:refresh' });",
+      path: '$.collectionRefreshRequest.code',
+      modelUse: 'JSBlockModel',
+    });
+    expect(collectionRefreshRequestErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ruleId: 'runjs-resource-action-invalid',
+          details: expect.objectContaining({
+            actionName: 'refresh',
+            endpoint: 'collection:refresh',
+            repairClass: 'resource-runtime-contract-stop',
+          }),
+        }),
+      ]),
+    );
+
+    const namedCollectionRefreshRequestErrors = inspectRunJsAuthoringCode(
+      {
+        code: "ctx.render(null);\nawait ctx.api.request({ url: '/api/tasks:refresh' });",
+        path: '$.namedCollectionRefreshRequest.code',
+        modelUse: 'JSBlockModel',
+      },
+      {
+        getCollection: (_dataSourceKey, collectionName) =>
+          collectionName === 'tasks' ? { name: collectionName } : null,
+      },
+    );
+    expect(namedCollectionRefreshRequestErrors.map((error: any) => error.ruleId)).toContain(
+      'runjs-resource-action-invalid',
+    );
 
     const collectionRequestErrors = inspectRunJsAuthoringCode({
       code: "ctx.render(null);\nawait ctx.request({ url: 'tasks:list', method: 'get' });",
@@ -2765,6 +2979,13 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
     });
     expect(ordinaryRunjsLabelCallErrors.map((error: any) => error.ruleId)).toContain('runjs-nested-runjs-forbidden');
 
+    const collectionRefreshRunjsErrors = inspectRunJsAuthoringCode({
+      code: "ctx.render(null);\nawait ctx.runjs('collection:refresh', {});",
+      path: '$.collectionRefreshRunjs.code',
+      modelUse: 'JSBlockModel',
+    });
+    expect(collectionRefreshRunjsErrors.map((error: any) => error.ruleId)).toContain('runjs-resource-action-invalid');
+
     const invalidApiResourceErrors = inspectRunJsAuthoringCode({
       code: "ctx.render(null);\nawait ctx.api.resource.list({ resource: 'tasks', pageSize: 1 });",
       path: '$.invalidApiResource.code',
@@ -2781,6 +3002,21 @@ describe('flowSurfaces backend authoring aggregate errors', () => {
           }),
         }),
       ]),
+    );
+
+    const invalidApiResourceRefreshErrors = inspectRunJsAuthoringCode(
+      {
+        code: "ctx.render(null);\nawait ctx.api.resource('tasks', 'refresh');\nawait ctx.api.resource('tasks').refresh();",
+        path: '$.invalidApiResourceRefresh.code',
+        modelUse: 'JSBlockModel',
+      },
+      {
+        getCollection: (_dataSourceKey, collectionName) =>
+          collectionName === 'tasks' ? { name: collectionName } : null,
+      },
+    );
+    expect(invalidApiResourceRefreshErrors.map((error: any) => error.ruleId)).toContain(
+      'runjs-resource-action-invalid',
     );
 
     const opencodeActionResourceErrors = inspectRunJsAuthoringCode({
@@ -5616,6 +5852,7 @@ ctx.render(React.createElement(DashboardKPIs));
           'const React = ctx.libs.React;',
           'const { ReactDOM, antdIcons } = ctx.libs;',
           'const custom = ctx.libs.customLib;',
+          "const libName = 'customLib';",
           'const dynamic = ctx.libs[libName];',
           'ctx.render(React.createElement("div", null, Boolean(ReactDOM || antdIcons || custom || dynamic)));',
         ].join('\n'),
@@ -6881,13 +7118,24 @@ ctx.render(React.createElement(DashboardKPIs));
       ]),
     );
 
-    expect(
-      inspectRunJsAuthoringCode({
-        code: "class Local { static { var run = ctx.runjs; } }\nawait run('return 1;');",
-        path: '$.staticBlockVarRunjsAliasDoesNotLeak.code',
-        modelUse: 'JSActionModel',
-      }),
-    ).toEqual([]);
+    const staticBlockVarRunjsAliasErrors = inspectRunJsAuthoringCode({
+      code: "class Local { static { var run = ctx.runjs; } }\nawait run('return 1;');",
+      path: '$.staticBlockVarRunjsAliasDoesNotLeak.code',
+      modelUse: 'JSActionModel',
+    });
+    expect(staticBlockVarRunjsAliasErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ruleId: 'runjs-global-unknown',
+          details: expect.objectContaining({
+            global: 'run',
+          }),
+        }),
+      ]),
+    );
+    expect(staticBlockVarRunjsAliasErrors.map((error: any) => error.ruleId)).not.toContain(
+      'runjs-nested-runjs-forbidden',
+    );
 
     expect(
       inspectRunJsAuthoringCode({
@@ -6950,19 +7198,30 @@ ctx.render(React.createElement(DashboardKPIs));
       ]),
     );
 
-    expect(
-      inspectRunJsAuthoringCode({
-        code: [
-          'class Local { static {',
-          "  function wrap() { var resource = ctx.makeResource('MultiRecordResource'); }",
-          '  resource.list();',
-          '} }',
-          "ctx.message.success('Done');",
-        ].join('\n'),
-        path: '$.staticBlockNestedFunctionVarResourceAliasDoesNotLeak.code',
-        modelUse: 'JSActionModel',
-      }),
-    ).toEqual([]);
+    const staticBlockNestedFunctionVarResourceAliasErrors = inspectRunJsAuthoringCode({
+      code: [
+        'class Local { static {',
+        "  function wrap() { var resource = ctx.makeResource('MultiRecordResource'); }",
+        '  resource.list();',
+        '} }',
+        "ctx.message.success('Done');",
+      ].join('\n'),
+      path: '$.staticBlockNestedFunctionVarResourceAliasDoesNotLeak.code',
+      modelUse: 'JSActionModel',
+    });
+    expect(staticBlockNestedFunctionVarResourceAliasErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ruleId: 'runjs-global-unknown',
+          details: expect.objectContaining({
+            global: 'resource',
+          }),
+        }),
+      ]),
+    );
+    expect(staticBlockNestedFunctionVarResourceAliasErrors.map((error: any) => error.ruleId)).not.toContain(
+      'runjs-resource-method-unknown',
+    );
 
     expect(
       inspectRunJsAuthoringCode({
@@ -6976,31 +7235,53 @@ ctx.render(React.createElement(DashboardKPIs));
       }),
     ).toEqual([]);
 
-    expect(
-      inspectRunJsAuthoringCode({
-        code: [
-          'class Local { static {',
-          '  function wrap() { var Card = ctx.libs.antd.Card; }',
-          '  Card({ bordered: false });',
-          '} }',
-          'ctx.render(null);',
-        ].join('\n'),
-        path: '$.staticBlockNestedFunctionVarReactAliasDoesNotLeak.code',
-        modelUse: 'JSBlockModel',
-      }),
-    ).toEqual([]);
+    const staticBlockNestedFunctionVarReactAliasErrors = inspectRunJsAuthoringCode({
+      code: [
+        'class Local { static {',
+        '  function wrap() { var Card = ctx.libs.antd.Card; }',
+        '  Card({ bordered: false });',
+        '} }',
+        'ctx.render(null);',
+      ].join('\n'),
+      path: '$.staticBlockNestedFunctionVarReactAliasDoesNotLeak.code',
+      modelUse: 'JSBlockModel',
+    });
+    expect(staticBlockNestedFunctionVarReactAliasErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ruleId: 'runjs-global-unknown',
+          details: expect.objectContaining({
+            global: 'Card',
+          }),
+        }),
+      ]),
+    );
+    expect(staticBlockNestedFunctionVarReactAliasErrors.map((error: any) => error.ruleId)).not.toContain(
+      'runjs-ctx-libs-member-unknown',
+    );
 
-    expect(
-      inspectRunJsAuthoringCode({
-        code: [
-          'class Local { static { var Card = ctx.libs.antd.Card; } }',
-          'Card({ bordered: false });',
-          'ctx.render(null);',
-        ].join('\n'),
-        path: '$.staticBlockVarReactAliasDoesNotLeak.code',
-        modelUse: 'JSBlockModel',
-      }),
-    ).toEqual([]);
+    const staticBlockVarReactAliasErrors = inspectRunJsAuthoringCode({
+      code: [
+        'class Local { static { var Card = ctx.libs.antd.Card; } }',
+        'Card({ bordered: false });',
+        'ctx.render(null);',
+      ].join('\n'),
+      path: '$.staticBlockVarReactAliasDoesNotLeak.code',
+      modelUse: 'JSBlockModel',
+    });
+    expect(staticBlockVarReactAliasErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ruleId: 'runjs-global-unknown',
+          details: expect.objectContaining({
+            global: 'Card',
+          }),
+        }),
+      ]),
+    );
+    expect(staticBlockVarReactAliasErrors.map((error: any) => error.ruleId)).not.toContain(
+      'runjs-ctx-libs-member-unknown',
+    );
 
     expect(
       inspectRunJsAuthoringCode({
@@ -7319,9 +7600,20 @@ ctx.render(React.createElement(DashboardKPIs));
     });
 
     expect(response.status).toBe(400);
+    expect(response.body).toEqual(
+      expect.objectContaining({
+        errorCount: response.body.errors.length,
+        details: expect.objectContaining({
+          mustFixAllErrorsBeforeRetry: true,
+          retryPolicy: 'fix_all_errors_before_retry_same_write',
+          agentInstruction: expect.stringContaining('Fix every listed error'),
+        }),
+      }),
+    );
     const issue = response.body?.errors?.find((error: any) => error.ruleId === 'runjs-render-required');
     expect(issue).toEqual(
       expect.objectContaining({
+        index: expect.any(Number),
         type: 'bad_request',
         code: 'FLOW_SURFACE_AUTHORING_VALIDATION_ERROR',
         status: 400,
@@ -8084,6 +8376,12 @@ ctx.render(React.createElement(DashboardKPIs));
       });
       expect(error.message).toContain('Add collection field names');
       expect(error.message).toContain('defaults.collections.*.fieldGroups');
+      expect(error.details).toEqual(
+        expect.objectContaining({
+          repairHint: expect.stringContaining('Add direct visible collection fields'),
+          agentInstruction: expect.stringContaining('fix every listed error'),
+        }),
+      );
     }
   });
 
@@ -8463,6 +8761,7 @@ ctx.render(React.createElement(DashboardKPIs));
         target: { uid: page.gridUid },
         type: 'table',
         resource: {
+          dataSourceKey: 'main',
           collectionName: 'employees',
         },
       },
@@ -8493,6 +8792,220 @@ ctx.render(React.createElement(DashboardKPIs));
       'data-block-visible-fields-required',
     );
     expect(addBlocksResponse.body?.errors?.map((error: any) => error.path)).toContain('$.blocks[0].fields');
+  });
+
+  it('should allow JS field entries without business fields before authoring writes', async () => {
+    const applyBlueprintResponse = await rootAgent.resource('flowSurfaces').applyBlueprint({
+      values: {
+        mode: 'create',
+        navigation: {
+          item: {
+            title: 'Authoring JS field only visible data blocks',
+          },
+        },
+        tabs: [
+          {
+            title: 'Overview',
+            blocks: [
+              {
+                key: 'jsColumnOnlyTable',
+                type: 'table',
+                collection: 'employees',
+                fields: [
+                  {
+                    key: 'employeeSummary',
+                    type: 'jsColumn',
+                    settings: {
+                      code: `ctx.render('Employee summary');`,
+                    },
+                  },
+                ],
+              },
+              {
+                key: 'jsItemOnlyCreateForm',
+                type: 'createForm',
+                collection: 'employees',
+                fields: [
+                  {
+                    key: 'employeePreview',
+                    type: 'jsItem',
+                    settings: {
+                      code: `ctx.render('Employee preview');`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(applyBlueprintResponse.status, readErrorMessage(applyBlueprintResponse)).toBe(200);
+
+    const composePage = await createPage(rootAgent, {
+      title: 'Authoring compose JS field only page',
+      tabTitle: 'Authoring compose JS field only tab',
+    });
+    const composeResponse = await rootAgent.resource('flowSurfaces').compose({
+      values: {
+        target: { uid: composePage.gridUid },
+        blocks: [
+          {
+            key: 'composeJsColumnOnlyTable',
+            type: 'table',
+            resource: {
+              dataSourceKey: 'main',
+              collectionName: 'employees',
+            },
+            fields: [
+              {
+                key: 'employeeStatus',
+                fieldPath: 'status',
+                renderer: 'js',
+                settings: {
+                  code: `ctx.render(ctx.value || 'No status');`,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(composeResponse.status, readErrorMessage(composeResponse)).toBe(200);
+
+    const addBlockPage = await createPage(rootAgent, {
+      title: 'Authoring add block JS field only page',
+      tabTitle: 'Authoring add block JS field only tab',
+    });
+    const addBlockResponse = await rootAgent.resource('flowSurfaces').addBlock({
+      values: {
+        target: { uid: addBlockPage.gridUid },
+        type: 'table',
+        resource: {
+          dataSourceKey: 'main',
+          collectionName: 'employees',
+        },
+        fields: [
+          {
+            key: 'employeeMetric',
+            type: 'jsColumn',
+            settings: {
+              code: `ctx.render('Metric');`,
+            },
+          },
+        ],
+      },
+    });
+
+    expect(addBlockResponse.status, readErrorMessage(addBlockResponse)).toBe(200);
+
+    const addBlocksResponse = await rootAgent.resource('flowSurfaces').addBlocks({
+      values: {
+        target: { uid: addBlockPage.gridUid },
+        blocks: [
+          {
+            type: 'table',
+            resource: {
+              dataSourceKey: 'main',
+              collectionName: 'employees',
+            },
+            fields: [
+              {
+                key: 'employeeRisk',
+                type: 'jsColumn',
+                settings: {
+                  code: `ctx.render('Risk');`,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(addBlocksResponse.status, readErrorMessage(addBlocksResponse)).toBe(200);
+  });
+
+  it('should keep visible field error text when JS inputs are not valid field substitutes', async () => {
+    const response = await rootAgent.resource('flowSurfaces').applyBlueprint({
+      values: {
+        mode: 'create',
+        navigation: {
+          item: {
+            title: 'Authoring invalid JS field substitute data blocks',
+          },
+        },
+        tabs: [
+          {
+            title: 'Overview',
+            blocks: [
+              {
+                key: 'jsActionOnlyTable',
+                type: 'table',
+                collection: 'employees',
+                actions: [
+                  {
+                    key: 'tableJsAction',
+                    type: 'jsItem',
+                    settings: {
+                      code: `ctx.render('Action');`,
+                    },
+                  },
+                ],
+              },
+              {
+                key: 'wrongContainerJsItemTable',
+                type: 'table',
+                collection: 'employees',
+                fields: [
+                  {
+                    key: 'wrongTableItem',
+                    type: 'jsItem',
+                    settings: {
+                      code: `ctx.render('Wrong table item');`,
+                    },
+                  },
+                ],
+              },
+              {
+                key: 'wrongContainerJsColumnForm',
+                type: 'createForm',
+                collection: 'employees',
+                fields: [
+                  {
+                    key: 'wrongFormColumn',
+                    type: 'jsColumn',
+                    settings: {
+                      code: `ctx.render('Wrong form column');`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(response.status).toBe(400);
+    const visibleFieldErrors = response.body?.errors?.filter(
+      (error: any) => error.ruleId === 'data-block-visible-fields-required',
+    );
+    expect(visibleFieldErrors).toHaveLength(3);
+    expect(visibleFieldErrors.map((error: any) => error.path)).toEqual(
+      expect.arrayContaining([
+        '$.tabs[0].blocks[0].fields',
+        '$.tabs[0].blocks[1].fields',
+        '$.tabs[0].blocks[2].fields',
+      ]),
+    );
+    for (const visibleFieldError of visibleFieldErrors) {
+      expect(visibleFieldError?.message).toContain('Add collection field names');
+      expect(visibleFieldError?.message).toContain('defaults.collections.*.fieldGroups');
+      expect(visibleFieldError?.message).not.toContain('JS');
+    }
   });
 
   it('should allow direct visible data blocks with valid business fields', async () => {
@@ -8684,6 +9197,150 @@ ctx.render(React.createElement(DashboardKPIs));
     ).map((item: any) => item.stepParams.fieldSettings.init.fieldPath);
     expect(generatedFieldPaths).toEqual(expect.arrayContaining(GENERATED_POPUP_TEN_EFFECTIVE_FIELDS));
     expect(generatedFieldPaths).not.toContain('internalSort');
+  });
+
+  it('should not count relation backing foreign keys as generated popup defaults', async () => {
+    const response = await rootAgent.resource('flowSurfaces').applyBlueprint({
+      values: {
+        mode: 'create',
+        navigation: {
+          item: {
+            title: 'Authoring relation backing FK generated popup fields',
+          },
+        },
+        tabs: [
+          {
+            title: 'Overview',
+            blocks: [
+              {
+                key: 'relationBackingFkRecordsTable',
+                type: 'table',
+                collection: GENERATED_POPUP_RELATION_BACKING_FK_COLLECTION,
+                fields: GENERATED_POPUP_RELATION_BACKING_FK_FIELDS.slice(0, 3),
+                defaultFilter: {
+                  logic: '$and',
+                  items: [
+                    { path: GENERATED_POPUP_RELATION_BACKING_FK_FIELDS[0], operator: '$notEmpty' },
+                    { path: GENERATED_POPUP_RELATION_BACKING_FK_FIELDS[1], operator: '$notEmpty' },
+                    { path: GENERATED_POPUP_RELATION_BACKING_FK_FIELDS[2], operator: '$notEmpty' },
+                    { path: GENERATED_POPUP_RELATION_BACKING_FK_FIELDS[3], operator: '$notEmpty' },
+                  ],
+                },
+                actions: [
+                  {
+                    key: 'createRelationBackingFkRecord',
+                    type: 'addNew',
+                    popup: {},
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(response.status, readErrorMessage(response)).toBe(200);
+    const data = getData(response);
+    const tableBlock = collectDescendantNodes(data.surface.tree, (item) => item?.use === 'TableBlockModel')[0];
+    const persistedTable = await context.flowRepo.findModelById(tableBlock.uid, { includeAsyncNode: true });
+    const createAction = collectDescendantNodes(persistedTable, (item) => item?.use === 'AddNewActionModel')[0];
+    const persistedAction = await context.flowRepo.findModelById(createAction.uid, { includeAsyncNode: true });
+    const popupTemplateUid = persistedAction?.stepParams?.popupSettings?.openView?.popupTemplateUid;
+    expect(popupTemplateUid).toBeTruthy();
+
+    const template = getData(
+      await rootAgent.resource('flowSurfaces').getTemplate({
+        values: {
+          uid: popupTemplateUid,
+        },
+      }),
+    );
+    const templateSurface = await context.flowRepo.findModelById(template.targetUid, { includeAsyncNode: true });
+    const createForm = collectDescendantNodes(templateSurface, (item) => item?.use === 'CreateFormModel')[0];
+    const generatedFieldPaths = collectDescendantNodes(
+      createForm,
+      (item) => !!item?.stepParams?.fieldSettings?.init?.fieldPath,
+    ).map((item: any) => item.stepParams.fieldSettings.init.fieldPath);
+    expect(generatedFieldPaths).toEqual(
+      expect.arrayContaining([
+        ...GENERATED_POPUP_RELATION_BACKING_FK_FIELDS,
+        GENERATED_POPUP_RELATION_BACKING_FK_FIELD,
+      ]),
+    );
+    expect(generatedFieldPaths).not.toContain(GENERATED_POPUP_RELATION_BACKING_FK_NAME);
+  });
+
+  it('should keep explicitly listed relation backing foreign keys in generated popup defaults', async () => {
+    const response = await rootAgent.resource('flowSurfaces').applyBlueprint({
+      values: {
+        mode: 'create',
+        navigation: {
+          item: {
+            title: 'Authoring explicit relation backing FK generated popup fields',
+          },
+        },
+        defaults: {
+          collections: {
+            [GENERATED_POPUP_RELATION_BACKING_FK_COLLECTION]: {
+              fieldGroups: [
+                {
+                  title: 'Explicit fields',
+                  fields: [
+                    GENERATED_POPUP_RELATION_BACKING_FK_FIELDS[0],
+                    GENERATED_POPUP_RELATION_BACKING_FK_NAME,
+                    GENERATED_POPUP_RELATION_BACKING_FK_FIELD,
+                  ],
+                },
+              ],
+            },
+          },
+        },
+        tabs: [
+          {
+            title: 'Overview',
+            blocks: [
+              {
+                key: 'explicitRelationBackingFkRecordsTable',
+                type: 'table',
+                collection: GENERATED_POPUP_RELATION_BACKING_FK_COLLECTION,
+                fields: GENERATED_POPUP_RELATION_BACKING_FK_FIELDS.slice(0, 3),
+                actions: [
+                  {
+                    key: 'createExplicitRelationBackingFkRecord',
+                    type: 'addNew',
+                    popup: {
+                      tryTemplate: false,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(response.status, readErrorMessage(response)).toBe(200);
+    const data = getData(response);
+    const tableBlock = collectDescendantNodes(data.surface.tree, (item) => item?.use === 'TableBlockModel')[0];
+    const persistedTable = await context.flowRepo.findModelById(tableBlock.uid, { includeAsyncNode: true });
+    const createAction = collectDescendantNodes(persistedTable, (item) => item?.use === 'AddNewActionModel')[0];
+    const persistedAction = await context.flowRepo.findModelById(createAction.uid, { includeAsyncNode: true });
+    expect(persistedAction?.stepParams?.popupSettings?.openView?.popupTemplateUid).toBeFalsy();
+    const createForm = collectDescendantNodes(persistedAction, (item) => item?.use === 'CreateFormModel')[0];
+    expect(createForm).toBeTruthy();
+    const generatedFieldPaths = collectDescendantNodes(
+      createForm,
+      (item) => !!item?.stepParams?.fieldSettings?.init?.fieldPath,
+    ).map((item: any) => item.stepParams.fieldSettings.init.fieldPath);
+    expect(generatedFieldPaths).toEqual(
+      expect.arrayContaining([
+        GENERATED_POPUP_RELATION_BACKING_FK_FIELDS[0],
+        GENERATED_POPUP_RELATION_BACKING_FK_NAME,
+        GENERATED_POPUP_RELATION_BACKING_FK_FIELD,
+      ]),
+    );
   });
 
   it('should require explicit defaults formBehavior when generated add or edit popup fields have descriptions', async () => {
@@ -11595,6 +12252,21 @@ ctx.render(React.createElement(DashboardKPIs));
     });
 
     expect(response.status).toBe(400);
+    expect(response.body).toEqual(
+      expect.objectContaining({
+        errorCount: response.body.errors.length,
+        details: expect.objectContaining({
+          mustFixAllErrorsBeforeRetry: true,
+          retryPolicy: 'fix_all_errors_before_retry_same_write',
+          agentInstruction: expect.stringContaining('Fix every listed error'),
+          requiredBlockPolicy: expect.objectContaining({
+            requiredBlockTypes: expect.arrayContaining(['chart']),
+            fixStrategy: 'repair_same_block_type',
+            doNotReplaceOrDrop: true,
+          }),
+        }),
+      }),
+    );
     expect(response.body?.errors?.map((error: any) => error.ruleId)).toEqual(
       expect.arrayContaining([
         'chart-asset-invalid',
@@ -11609,6 +12281,19 @@ ctx.render(React.createElement(DashboardKPIs));
     );
     expect(response.body.errors.map((error: any) => error.ruleId)).not.toContain(
       'public-data-surface-default-filter-required',
+    );
+    const chartIssue = response.body.errors.find(
+      (error: any) => error.ruleId === 'chart-block-asset-reference-required',
+    );
+    expect(chartIssue).toEqual(
+      expect.objectContaining({
+        index: expect.any(Number),
+        details: expect.objectContaining({
+          requiredBlockType: 'chart',
+          fixStrategy: 'repair_same_block_type',
+          agentInstruction: expect.stringContaining('Repair it as chart'),
+        }),
+      }),
     );
   });
 

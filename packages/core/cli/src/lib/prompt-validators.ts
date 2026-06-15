@@ -14,12 +14,17 @@ import { translateCli } from './cli-locale.ts';
 
 const API_BASE_URL_EXAMPLE = 'http://localhost:13000/api';
 const ENV_KEY_PATTERN = /^[A-Za-z0-9]+$/;
+const APP_PUBLIC_PATH_PATTERN = /^\/(?:[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*)?\/?$/;
 const TCP_PORT_EXAMPLE = '13000';
 const API_BASE_URL_REQUEST_TIMEOUT_MS = 5_000;
 const TCP_PORT_PROBE_HOSTS = ['127.0.0.1', '0.0.0.0', '::1'] as const;
 
 function buildHealthCheckUrl(apiBaseUrl: string): string {
   return `${apiBaseUrl.replace(/\/+$/, '')}/__health_check`;
+}
+
+function hasSupportedApiBasePath(pathname: string): boolean {
+  return /\/api(?:\/__app\/[^/]+)?\/?$/.test(pathname);
 }
 
 function isMaintainingHealthCheckResponse(status: number, body: unknown): boolean {
@@ -60,6 +65,10 @@ export async function validateApiBaseUrl(value: PromptValue): Promise<string | u
 
   if (/\/__health_check\/?$/i.test(url.pathname)) {
     return translateCli('validators.apiBaseUrl.healthCheckPathNotAllowed');
+  }
+
+  if (!hasSupportedApiBasePath(url.pathname)) {
+    return translateCli('validators.apiBaseUrl.missingApiPrefix', { example: API_BASE_URL_EXAMPLE });
   }
 
   const controller = new AbortController();
@@ -114,6 +123,23 @@ export function validateEnvKey(value: PromptValue): string | undefined {
 
   if (!ENV_KEY_PATTERN.test(raw)) {
     return translateCli('validators.envKey.invalid');
+  }
+
+  return undefined;
+}
+
+export function validateAppPublicPath(value: PromptValue): string | undefined {
+  const raw = String(value ?? '').trim();
+  if (raw === '') {
+    return undefined;
+  }
+
+  if (!raw.startsWith('/')) {
+    return translateCli('validators.appPublicPath.invalid');
+  }
+
+  if (!APP_PUBLIC_PATH_PATTERN.test(raw)) {
+    return translateCli('validators.appPublicPath.invalid');
   }
 
   return undefined;

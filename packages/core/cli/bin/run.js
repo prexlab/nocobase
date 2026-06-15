@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import pc from 'picocolors';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { formatUnsupportedNodeVersionMessage, isSupportedNodeVersion } from './node-version.js';
 import { normalizeNodeOptions, normalizeSessionEnv } from './session-env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +17,11 @@ const isSourcePackage = realRoot.split(path.sep).join('/').endsWith('/packages/c
 let isDev = isSourcePackage;
 if (process.env.NB_CLI_USE_DIST === '1') {
   isDev = false;
+}
+
+if (!isSupportedNodeVersion()) {
+  console.error(pc.red(formatUnsupportedNodeVersionMessage(process.version)));
+  process.exit(1);
 }
 
 normalizeSessionEnv();
@@ -66,6 +72,10 @@ if (isDev && !process.env._NOCO_CLI_TSX_CHILD) {
 
 const bootstrapPath = isDev ? path.join(root, 'src/lib/bootstrap.ts') : path.join(root, 'dist/lib/bootstrap.js');
 const { ensureRuntimeFromArgv } = await import(pathToFileURL(bootstrapPath).href);
+const commandLogPath = isDev ? path.join(root, 'src/lib/command-log.ts') : path.join(root, 'dist/lib/command-log.js');
+const { finalizeCommandLogSessionSync, initCommandLogSession, installCommandLogWriteHooks } = await import(
+  pathToFileURL(commandLogPath).href
+);
 const startupUpdatePath = isDev
   ? path.join(root, 'src/lib/startup-update.ts')
   : path.join(root, 'dist/lib/startup-update.js');
@@ -73,15 +83,44 @@ const { maybeRunStartupUpdate } = await import(pathToFileURL(startupUpdatePath).
 const cliEntryErrorPath = isDev
   ? path.join(root, 'src/lib/cli-entry-error.ts')
   : path.join(root, 'dist/lib/cli-entry-error.js');
-const { formatCliEntryError } = await import(pathToFileURL(cliEntryErrorPath).href);
+const { appendDiagnosticLogPath, formatCliEntryError } = await import(pathToFileURL(cliEntryErrorPath).href);
 const { flush, run, settings } = await import('@oclif/core');
+const forcedColors = pc.createColors(true);
 
 if (isDev) {
   settings.debug = true;
 }
 
+const cliPackageJson = requireFromCli(path.join(root, 'package.json'));
+const argv = process.argv.slice(2);
+const commandLogSession = await initCommandLogSession({
+  argv,
+  cwd: process.cwd(),
+  sessionId: process.env.NB_SESSION_ID,
+  cliVersion: cliPackageJson?.version,
+  nodeVersion: process.version,
+  platform: process.platform,
+  interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  verbose: argv.includes('--verbose'),
+});
+const restoreCommandLogHooks = installCommandLogWriteHooks();
+let commandLogFinalized = false;
+
+function finalizeCommandLogOnce(options = {}) {
+  if (commandLogFinalized) {
+    return;
+  }
+
+  commandLogFinalized = true;
+  restoreCommandLogHooks?.();
+  finalizeCommandLogSessionSync(commandLogSession, options);
+}
+
+process.once('exit', (code) => {
+  finalizeCommandLogOnce({ exitCode: code ?? undefined });
+});
+
 try {
-  const argv = process.argv.slice(2);
   const startupUpdate = await maybeRunStartupUpdate(argv);
   if (startupUpdate.kind === 'updated') {
     const result = spawnSync(process.execPath, process.argv.slice(1), {
@@ -100,8 +139,13 @@ try {
   }
   await run(argv, import.meta.url);
   flush();
+  finalizeCommandLogOnce({ exitCode: 0 });
 } catch (error) {
-  const message = formatCliEntryError(error, process.argv.slice(2));
-  console.error(pc.red(message));
+  const message = appendDiagnosticLogPath(
+    formatCliEntryError(error, process.argv.slice(2)),
+    commandLogSession?.logFile,
+  );
+  console.error(forcedColors.red(message));
+  finalizeCommandLogOnce({ exitCode: 1, errorMessage: message });
   process.exit(1);
 }

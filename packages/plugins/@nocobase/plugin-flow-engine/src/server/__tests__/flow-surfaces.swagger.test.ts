@@ -116,6 +116,13 @@ describe('flowSurfaces swagger', () => {
       'FlowSurfaceApplyBlueprintReactionItemSetActionLinkageRules',
       'FlowSurfaceDescribeSurfaceRequest',
       'FlowSurfaceDescribeSurfaceResponse',
+      'FlowSurfaceExportBlueprintUnsupportedPolicy',
+      'FlowSurfaceExportBlueprintUnsupportedItem',
+      'FlowSurfaceExportBlueprintTarget',
+      'FlowSurfaceExportBlueprintRequest',
+      'FlowSurfaceExportBlueprintSource',
+      'FlowSurfaceExportBlueprintDocument',
+      'FlowSurfaceExportBlueprintResponse',
       'FlowSurfaceApplyBlueprintReactionItem',
       'FlowSurfaceApplyBlueprintReaction',
       'FlowSurfaceApplyBlueprintDefaultFieldSpec',
@@ -201,6 +208,38 @@ describe('flowSurfaces swagger', () => {
       type: 'string',
       example: 'FLOW_SURFACE_BAD_REQUEST',
     });
+    expect(schemas.FlowSurfaceErrorResponse.properties.message).toMatchObject({
+      type: 'string',
+    });
+    expect(schemas.FlowSurfaceErrorResponse.properties.errorCount).toMatchObject({
+      type: 'integer',
+      example: 2,
+    });
+    expect(schemas.FlowSurfaceErrorResponse.properties.details.properties.retryPolicy).toMatchObject({
+      type: 'string',
+      example: 'fix_all_errors_before_retry_same_write',
+    });
+    expect(schemas.FlowSurfaceErrorResponse.properties.details.properties.mustFixAllErrorsBeforeRetry).toMatchObject({
+      type: 'boolean',
+      example: true,
+    });
+    expect(schemas.FlowSurfaceErrorResponse.properties.details.properties.requiredBlockPolicy.properties).toEqual(
+      expect.objectContaining({
+        requiredBlockTypes: expect.objectContaining({
+          type: 'array',
+        }),
+        fixStrategy: expect.objectContaining({
+          example: 'repair_same_block_type',
+        }),
+        doNotReplaceOrDrop: expect.objectContaining({
+          type: 'boolean',
+        }),
+      }),
+    );
+    expect(schemas.FlowSurfaceErrorResponse.properties.errors.items.properties.index).toMatchObject({
+      type: 'integer',
+      example: 1,
+    });
     expect(schemas.FlowSurfaceErrorResponse.properties.errors.items.properties.status).toMatchObject({
       type: 'integer',
       example: 400,
@@ -281,6 +320,58 @@ describe('flowSurfaces swagger', () => {
     expect(schemas.FlowSurfaceDescribeSurfaceResponse.properties.fingerprint.type).toBe('string');
     expect(schemas.FlowSurfaceDescribeSurfaceResponse.properties.keys.$ref).toBe(
       '#/components/schemas/FlowSurfaceKeysMap',
+    );
+    expect(schemas.FlowSurfaceExportBlueprintRequest.required).toEqual(['target']);
+    expect(schemas.FlowSurfaceExportBlueprintRequest.properties.options.additionalProperties).toBe(false);
+    expect(schemas.FlowSurfaceExportBlueprintRequest.properties.options.properties.unsupported.$ref).toBe(
+      '#/components/schemas/FlowSurfaceExportBlueprintUnsupportedPolicy',
+    );
+    expect(schemas.FlowSurfaceExportBlueprintRequest.properties.target.$ref).toBe(
+      '#/components/schemas/FlowSurfaceExportBlueprintTarget',
+    );
+    expect(schemas.FlowSurfaceExportBlueprintTarget.oneOf.map((item) => item.required)).toEqual([
+      ['uid'],
+      ['pageSchemaUid'],
+      ['tabSchemaUid'],
+      ['routeId'],
+    ]);
+    schemas.FlowSurfaceExportBlueprintTarget.oneOf.forEach((item) => {
+      expect(item.additionalProperties).toBe(false);
+    });
+    expect(schemas.FlowSurfaceExportBlueprintUnsupportedPolicy.enum).toEqual(['error', 'warn']);
+    expect(schemas.FlowSurfaceExportBlueprintUnsupportedItem.required).toEqual([
+      'kind',
+      'path',
+      'reasonCode',
+      'manualAction',
+    ]);
+    expect(schemas.FlowSurfaceExportBlueprintResponse.required).toEqual([
+      'document',
+      'source',
+      'warnings',
+      'unsupported',
+    ]);
+    expect(schemas.FlowSurfaceExportBlueprintResponse.properties.document.$ref).toBe(
+      '#/components/schemas/FlowSurfaceExportBlueprintDocument',
+    );
+    expect(schemas.FlowSurfaceExportBlueprintDocument.required).toEqual([
+      'version',
+      'mode',
+      'target',
+      'tabs',
+      'assets',
+    ]);
+    expect(schemas.FlowSurfaceExportBlueprintDocument.properties.mode.enum).toEqual(['replace']);
+    expect(schemas.FlowSurfaceExportBlueprintDocument.properties.target.$ref).toBe(
+      '#/components/schemas/FlowSurfaceApplyBlueprintTarget',
+    );
+    expect(schemas.FlowSurfaceExportBlueprintDocument.properties.navigation).toBeUndefined();
+    expect(schemas.FlowSurfaceExportBlueprintDocument.additionalProperties).toBe(false);
+    expect(schemas.FlowSurfaceExportBlueprintResponse.properties.source.$ref).toBe(
+      '#/components/schemas/FlowSurfaceExportBlueprintSource',
+    );
+    expect(schemas.FlowSurfaceExportBlueprintSource.properties.target.$ref).toBe(
+      '#/components/schemas/FlowSurfaceApplyBlueprintTarget',
     );
     expect(schemas.FlowSurfaceGetReactionMetaRequest.required).toEqual(['target']);
     expect(schemas.FlowSurfaceGetReactionMetaResult.required).toEqual(['target', 'capabilities', 'unavailable']);
@@ -478,6 +569,8 @@ describe('flowSurfaces swagger', () => {
       'approvalInitiator',
       'approvalApprover',
       'approvalInformation',
+      'markdown',
+      'jsBlock',
     ]);
     expect(schemas.FlowSurfaceApprovalBlueprintBlockSpec.properties.template.$ref).toBe(
       '#/components/schemas/FlowSurfaceBlockTemplateRef',
@@ -494,6 +587,10 @@ describe('flowSurfaces swagger', () => {
     expect(schemas.FlowSurfaceApplyApprovalBlueprintRequest.description).toContain('initiator');
     expect(schemas.FlowSurfaceApplyApprovalBlueprintRequest.description).toContain('taskCard');
     expect(schemas.FlowSurfaceApplyApprovalBlueprintRequest.description).toContain('template: { uid, mode }');
+    expect(schemas.FlowSurfaceApplyApprovalBlueprintRequest.description).toContain('markdown');
+    expect(schemas.FlowSurfaceApplyApprovalBlueprintRequest.description).toContain('jsBlock');
+    expect(schemas.FlowSurfaceApplyApprovalBlueprintRequest.description).toContain('approvalSubmit');
+    expect(schemas.FlowSurfaceApplyApprovalBlueprintRequest.description).toContain('aggregate `errors[]`');
     expect(schemas.FlowSurfaceApplyApprovalBlueprintResponse.required).toEqual([
       'version',
       'mode',
@@ -1735,6 +1832,12 @@ describe('flowSurfaces swagger', () => {
     expect(schemas.FlowSurfaceBatchItemError.additionalProperties).toBe(false);
     expect(schemas.FlowSurfaceBatchItemError.properties.code.type).toBe('string');
     expect(schemas.FlowSurfaceBatchItemError.properties.status.type).toBe('integer');
+    expect(schemas.FlowSurfaceBatchItemError.properties.errorCount.type).toBe('integer');
+    expect(schemas.FlowSurfaceBatchItemError.properties.details.properties.retryPolicy.example).toBe(
+      'fix_all_errors_before_retry_same_write',
+    );
+    expect(schemas.FlowSurfaceBatchItemError.properties.errors.items.properties.index.type).toBe('integer');
+    expect(schemas.FlowSurfaceBatchItemError.properties.errors.items.additionalProperties).toBe(false);
     expect(schemas.FlowSurfaceBatchItemError.properties.type.enum).toEqual([
       'bad_request',
       'forbidden',

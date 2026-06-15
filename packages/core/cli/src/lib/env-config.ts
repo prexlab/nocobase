@@ -8,6 +8,7 @@
  */
 
 import type { EnvConfigEntry } from './auth-store.js';
+import { resolveAppPublicPath } from './app-public-path.js';
 
 const STRING_ENV_CONFIG_KEYS = [
   'source',
@@ -16,8 +17,11 @@ const STRING_ENV_CONFIG_KEYS = [
   'dockerPlatform',
   'gitUrl',
   'npmRegistry',
+  'appPath',
   'appRootPath',
   'storagePath',
+  'appPublicPath',
+  'cdnBaseUrl',
   'envFile',
   'appPort',
   'appKey',
@@ -32,6 +36,7 @@ const STRING_ENV_CONFIG_KEYS = [
   'dbPassword',
   'dbSchema',
   'dbTablePrefix',
+  'lang',
   'rootUsername',
   'rootEmail',
   'rootPassword',
@@ -53,6 +58,7 @@ export type StoredEnvConfigInput = {
   apiBaseUrl?: unknown;
   authType?: unknown;
   accessToken?: unknown;
+  setupState?: unknown;
 } & Partial<Record<StringEnvConfigKey | BooleanEnvConfigKey, unknown>>;
 
 export type StoredEnvConfig = Partial<
@@ -66,15 +72,20 @@ function trimConfigValue(value: unknown): string | undefined {
   return text || undefined;
 }
 
+function resolveSetupState(value: unknown): EnvConfigEntry['setupState'] {
+  return value === 'prepared' || value === 'installed' ? value : undefined;
+}
+
 function resolveEnvKind(input: StoredEnvConfigInput): EnvConfigEntry['kind'] {
   const source = trimConfigValue(input.source);
+  const appPath = trimConfigValue(input.appPath);
   const appRootPath = trimConfigValue(input.appRootPath);
 
   if (source === 'docker') {
     return 'docker';
   }
 
-  if (source === 'npm' || source === 'git' || source === 'local' || appRootPath) {
+  if (source === 'npm' || source === 'git' || source === 'local' || appPath || appRootPath) {
     return 'local';
   }
 
@@ -90,8 +101,13 @@ export function buildStoredEnvConfig(input: StoredEnvConfigInput): StoredEnvConf
   for (const key of STRING_ENV_CONFIG_KEYS) {
     const value = trimConfigValue(input[key]);
     if (value) {
-      envConfig[key] = value;
+      envConfig[key] = key === 'appPublicPath' ? resolveAppPublicPath(value) : value;
     }
+  }
+
+  const setupState = resolveSetupState(input.setupState);
+  if (setupState) {
+    envConfig.setupState = setupState;
   }
 
   for (const key of BOOLEAN_ENV_CONFIG_KEYS) {

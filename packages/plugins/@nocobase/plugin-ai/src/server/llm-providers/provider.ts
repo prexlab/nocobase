@@ -11,7 +11,7 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Model } from '@nocobase/database';
 import { AttachmentModel, PluginFileManagerServer } from '@nocobase/plugin-file-manager';
 import { Application } from '@nocobase/server';
-import axios from 'axios';
+import { checkUrlAgainstWhitelist, serverRequest } from '@nocobase/utils';
 import { AIChatContext } from '../types/ai-chat-conversation.type';
 import { buildTool, encodeFile, parseResponseMessage, stripToolCallTags } from '../utils';
 import { EmbeddingsInterface } from '@langchain/core/embeddings';
@@ -52,10 +52,26 @@ export interface LLMProviderOptions {
   modelOptions?: Record<string, any>;
 }
 
+function normalizeBaseURL(baseURL: string): string {
+  checkUrlAgainstWhitelist(baseURL);
+  return new URL(baseURL).toString().replace(/\/$/, '');
+}
+
+function resolveServiceOptions(serviceOptions: Record<string, any> | undefined, app: Application) {
+  const rendered = app.environment.renderJsonTemplate(serviceOptions ?? {});
+  if (rendered?.baseURL != null) {
+    if (typeof rendered.baseURL !== 'string') {
+      throw new Error('baseURL must be a string');
+    }
+    rendered.baseURL = normalizeBaseURL(rendered.baseURL);
+  }
+  return rendered;
+}
+
 export abstract class LLMProvider {
   app: Application;
   serviceOptions: Record<string, any>;
-  modelOptions: Record<string, any>;
+  modelOptions: Record<string, any> | undefined;
   chatModel: any;
 
   abstract createModel(): BaseChatModel | any;
@@ -67,7 +83,7 @@ export abstract class LLMProvider {
   constructor(opts: LLMProviderOptions) {
     const { app, serviceOptions, modelOptions } = opts;
     this.app = app;
-    this.serviceOptions = app.environment.renderJsonTemplate(serviceOptions);
+    this.serviceOptions = resolveServiceOptions(serviceOptions, app);
     if (modelOptions) {
       this.modelOptions = modelOptions;
       this.chatModel = this.createModel();
@@ -140,18 +156,19 @@ export abstract class LLMProvider {
   }> {
     const options = this.serviceOptions || {};
     const apiKey = options.apiKey;
-    let baseURL = options.baseURL || this.baseURL;
-    if (!baseURL) {
-      return { code: 400, errMsg: 'baseURL is required' };
+    let url: string;
+    try {
+      url = this.buildRequestURL('models');
+    } catch (e) {
+      return { code: 400, errMsg: e instanceof Error ? e.message : String(e) };
     }
     if (!apiKey) {
       return { code: 400, errMsg: 'API Key required' };
     }
-    if (baseURL && baseURL.endsWith('/')) {
-      baseURL = baseURL.slice(0, -1);
-    }
     try {
-      const res = await axios.get(`${baseURL}/models`, {
+      const res = await serverRequest({
+        method: 'GET',
+        url,
         headers: {
           Authorization: `Bearer ${apiKey}`,
         },
@@ -275,17 +292,18 @@ export abstract class LLMProvider {
     if (!schema) {
       return;
     }
-    const methods = {
+    const methods: Record<string, string> = {
       json_object: 'jsonMode',
       json_schema: 'jsonSchema',
     };
-    const options = {
+    const options: Record<string, any> = {
       includeRaw: true,
       name,
       method: methods[responseFormat],
     };
     if (strict) {
       options['strict'] = strict;
+      options['method'] = 'jsonSchema';
     }
     return {
       schema: {
@@ -333,7 +351,7 @@ export abstract class LLMProvider {
     return [];
   }
 
-  parseReasoningContent(chunk: AIMessageChunk): { status: string; content: string } {
+  parseReasoningContent(chunk: AIMessageChunk): { status: string; content: string } | null {
     return null;
   }
 
@@ -347,6 +365,23 @@ export abstract class LLMProvider {
 
   protected get documentLoader(): CachedDocumentLoader {
     return this.aiPlugin.documentLoaders.cached;
+  }
+
+  protected getResolvedBaseURL(): string {
+    const baseURL = this.serviceOptions?.baseURL ?? this.baseURL;
+    if (!baseURL) {
+      throw new Error('baseURL is required');
+    }
+    if (typeof baseURL !== 'string') {
+      throw new Error('baseURL must be a string');
+    }
+    return normalizeBaseURL(baseURL);
+  }
+
+  protected buildRequestURL(pathname: string): string {
+    const url = new URL(pathname.replace(/^\/+/, ''), `${this.getResolvedBaseURL()}/`).toString();
+    checkUrlAgainstWhitelist(url);
+    return url;
   }
 
   protected get aiPlugin(): PluginAIServer {
@@ -367,7 +402,7 @@ export abstract class EmbeddingProvider {
   constructor(protected opts: EmbeddingProviderOptions) {
     const { app, serviceOptions, modelOptions } = this.opts;
     this.app = app;
-    this.serviceOptions = app.environment.renderJsonTemplate(serviceOptions ?? {});
+    this.serviceOptions = resolveServiceOptions(serviceOptions, app);
     this.modelOptions = modelOptions;
   }
   abstract createEmbedding(): EmbeddingsInterface;
@@ -386,7 +421,10 @@ export abstract class EmbeddingProvider {
     if (!baseURL) {
       throw new Error('baseURL is required');
     }
-    return baseURL;
+    if (typeof baseURL !== 'string') {
+      throw new Error('baseURL must be a string');
+    }
+    return normalizeBaseURL(baseURL);
   }
 
   protected get model() {

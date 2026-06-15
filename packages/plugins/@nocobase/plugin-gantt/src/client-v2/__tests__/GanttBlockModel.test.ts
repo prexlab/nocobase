@@ -97,6 +97,7 @@ describe('PluginGanttClient model discovery', () => {
         Day: '天',
         Hour: '小时',
         'Event popup settings': '任务弹窗设置',
+        'Scroll to today on first display': '默认定位到今天',
         'Show table': '表格显示',
         'Table width': '表格宽度',
         Today: '今天',
@@ -109,6 +110,7 @@ describe('PluginGanttClient model discovery', () => {
         Day: '天',
         Hour: '小时',
         'Event popup settings': '任务弹窗设置',
+        'Scroll to today on first display': '默认定位到今天',
         'Show table': '表格显示',
         'Table width': '表格宽度',
         Today: '今天',
@@ -487,6 +489,47 @@ describe('GanttBlockModel settings', () => {
     expect(step?.hideInSettings?.({ model: { props: { showTable: false } } } as any)).toBe(true);
   });
 
+  test('keeps initial scroll to today disabled by default and persists the setting', () => {
+    const flowEngine = new FlowEngine();
+    flowEngine.registerModels({ GanttBlockModel });
+
+    const model = flowEngine.createModel<GanttBlockModel>({
+      use: 'GanttBlockModel',
+    });
+    const step = model.getFlow('ganttSettings')?.steps?.scrollToTodayOnFirstRender;
+
+    const defaultParams =
+      typeof step?.defaultParams === 'function' ? step.defaultParams({ model } as any) : step?.defaultParams;
+    expect(defaultParams).toEqual({ scrollToTodayOnFirstRender: false });
+    expect(model.shouldScrollToTodayOnFirstRender()).toBe(false);
+
+    step?.handler?.({ model } as any, { scrollToTodayOnFirstRender: true });
+    expect(model.props?.scrollToTodayOnFirstRender).toBe(true);
+    expect(model.shouldScrollToTodayOnFirstRender()).toBe(true);
+
+    step?.beforeParamsSave?.({ model } as any, { scrollToTodayOnFirstRender: false });
+    expect(model.props?.scrollToTodayOnFirstRender).toBe(false);
+    expect(model.shouldScrollToTodayOnFirstRender()).toBe(false);
+  });
+
+  test('reads the initial scroll to today setting from stored step params', () => {
+    const flowEngine = new FlowEngine();
+    flowEngine.registerModels({ GanttBlockModel });
+
+    const model = flowEngine.createModel<GanttBlockModel>({
+      use: 'GanttBlockModel',
+      stepParams: {
+        ganttSettings: {
+          scrollToTodayOnFirstRender: {
+            scrollToTodayOnFirstRender: true,
+          },
+        },
+      },
+    });
+
+    expect(model.shouldScrollToTodayOnFirstRender()).toBe(true);
+  });
+
   test('translates time scale options at settings render time', () => {
     const flowEngine = new FlowEngine();
     flowEngine.registerModels({ GanttBlockModel });
@@ -725,10 +768,27 @@ describe('GanttBlockModel settings', () => {
       mode: 'drawer',
       size: 'medium',
       pageModelClass: 'ChildPageModel',
-      uid: 'calendar-gantt-eventViewAction',
       dataSourceKey: 'main',
       collectionName: 'calendar',
     });
+    expect(params.uid).toBeTruthy();
+    expect(params.uid).not.toContain('eventViewAction');
+  });
+
+  test('persists popup actions only from popup settings save hooks', async () => {
+    const step = (GanttBlockModel as any).globalFlowRegistry.getFlow('ganttSettings')?.steps?.eventPopupSettings;
+    const model = {
+      setPopupSettings: vi.fn(),
+      ensurePopupAction: vi.fn().mockResolvedValue({ uid: 'u_event_popup' }),
+    };
+
+    await step?.handler?.({ model } as any, { mode: 'drawer' });
+
+    expect(model.ensurePopupAction).not.toHaveBeenCalled();
+
+    await step?.beforeParamsSave?.({ model } as any, { mode: 'dialog' });
+
+    expect(model.ensurePopupAction).toHaveBeenCalledWith('eventViewAction', { persist: true });
   });
 
   test('opens the configured event popup with the clicked task record', async () => {
@@ -754,16 +814,162 @@ describe('GanttBlockModel settings', () => {
     });
     const action = await model.ensurePopupAction('eventViewAction');
     action.dispatchEvent = vi.fn();
+    const openView = vi.fn();
+    model.context.defineMethod('openView', openView);
 
     await model.openEvent({ id: 12 });
 
-    expect(action.dispatchEvent).toHaveBeenCalledWith(
-      'click',
-      {
-        filterByTk: 12,
+    expect(action.uid).not.toContain('eventViewAction');
+    expect(openView).toHaveBeenCalledWith(action.uid, {
+      dataSourceKey: 'main',
+      collectionName: 'calendar',
+      filterByTk: 12,
+      target: model.context.layoutContentElement,
+    });
+    expect(action.dispatchEvent).not.toHaveBeenCalled();
+  });
+
+  test('does not persist hidden popup actions while opening gantt popups', async () => {
+    const save = vi.fn();
+    const saveStepParams = vi.fn();
+    const action = {
+      uid: 'u_event_popup',
+      getStepParams: vi.fn(() => ({})),
+      setStepParams: vi.fn(),
+      save,
+      saveStepParams,
+    };
+    const model = Object.create(GanttBlockModel.prototype) as GanttBlockModel;
+    Object.defineProperty(model, 'subModels', {
+      value: {
+        eventViewAction: action,
       },
-      { debounce: true },
-    );
+      configurable: true,
+    });
+    Object.defineProperty(model, 'context', {
+      value: {
+        flowSettingsEnabled: true,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'collection', {
+      value: {
+        name: 'calendar',
+        dataSourceKey: 'main',
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'props', {
+      value: {},
+      writable: true,
+      configurable: true,
+    });
+
+    await model.ensurePopupAction('eventViewAction');
+
+    expect(save).not.toHaveBeenCalled();
+    expect(saveStepParams).not.toHaveBeenCalled();
+    expect(action.setStepParams).toHaveBeenCalled();
+  });
+
+  test('persists hidden popup actions only when gantt popup settings are saved', async () => {
+    const save = vi.fn();
+    const saveStepParams = vi.fn();
+    const action = {
+      uid: 'u_event_popup',
+      getStepParams: vi.fn(() => ({})),
+      setStepParams: vi.fn(),
+      save,
+      saveStepParams,
+    };
+    const model = Object.create(GanttBlockModel.prototype) as GanttBlockModel;
+    Object.defineProperty(model, 'subModels', {
+      value: {
+        eventViewAction: action,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'context', {
+      value: {
+        flowSettingsEnabled: true,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'collection', {
+      value: {
+        name: 'calendar',
+        dataSourceKey: 'main',
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'props', {
+      value: {},
+      writable: true,
+      configurable: true,
+    });
+
+    await model.ensurePopupAction('eventViewAction', { persist: true });
+
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(saveStepParams).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps legacy gantt popup action uid usable when popup settings are saved', async () => {
+    const destroy = vi.fn();
+    const action = {
+      uid: 'calendar-gantt-eventViewAction',
+      getStepParams: vi.fn(() => ({})),
+      setStepParams: vi.fn(),
+      clone: vi.fn(),
+      save: vi.fn(),
+      saveStepParams: vi.fn(),
+      destroy,
+    };
+    const model = Object.create(GanttBlockModel.prototype) as GanttBlockModel;
+    Object.defineProperty(model, 'subModels', {
+      value: {
+        eventViewAction: action,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'context', {
+      value: {
+        flowSettingsEnabled: true,
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'collection', {
+      value: {
+        name: 'calendar',
+        dataSourceKey: 'main',
+      },
+      configurable: true,
+    });
+    Object.defineProperty(model, 'props', {
+      value: {},
+      writable: true,
+      configurable: true,
+    });
+    model.setSubModel = vi.fn(function (this: any, key, value) {
+      this.subModels[key] = value;
+      return value;
+    }) as any;
+
+    await model.ensurePopupAction('eventViewAction');
+
+    expect(action.clone).not.toHaveBeenCalled();
+    expect(model.subModels.eventViewAction).toBe(action);
+    expect(action.save).not.toHaveBeenCalled();
+    expect(action.saveStepParams).not.toHaveBeenCalled();
+    expect(destroy).not.toHaveBeenCalled();
+
+    await model.ensurePopupAction('eventViewAction', { persist: true });
+
+    expect(action.clone).not.toHaveBeenCalled();
+    expect(model.subModels.eventViewAction).toBe(action);
+    expect(action.save).toHaveBeenCalledTimes(1);
+    expect(action.saveStepParams).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
   });
 });
 
