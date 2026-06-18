@@ -32,6 +32,9 @@ const SCHEDULES_PAGE_SCHEMA_UID = 'bizblock-google-calendar-schedules';
 const SCHEDULES_PAGE_MENU_SCHEMA_UID = 'bizblock-google-calendar-schedules-menu';
 const SCHEDULES_PAGE_TAB_SCHEMA_UID = 'bizblock-google-calendar-schedules-main';
 const SCHEDULES_PAGE_TAB_SCHEMA_NAME = 'bizblockGoogleCalendarSchedulesMain';
+const AUTO_SYNC_INTERVAL_OPTIONS = [1, 5, 10, 15, 30, 60];
+const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES = 15;
+const MINUTE_MS = 60 * 1000;
 
 type GoogleCalendarSummary = {
   id: string;
@@ -65,8 +68,29 @@ type GoogleCalendarListEvent = GoogleCalendarEvent & {
   };
 };
 
+type GoogleCalendarSyncResult = {
+  users: number;
+  fetched: number;
+  created: number;
+  updated: number;
+  deleted: number;
+  skipped: number;
+  errors: { userId: string | number; message: string }[];
+};
+
+type GoogleCalendarSyncRange = {
+  startAt?: Date;
+  endAt?: Date;
+  updatedMin?: Date;
+};
+
 export class BizBlockGoogleCalendarSyncServer extends Plugin {
+  private autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoSyncRunning = false;
+
   async load() {
+    await this.syncRuntimeCollections();
+
     const actions = {
       getSettings: this.getSettings,
       setSettings: this.setSettings,
@@ -109,7 +133,26 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       actions: [`${RESOURCE_NAME}:*`],
     });
 
+    this.app.on('afterStart', this.startAutoSyncScheduler);
+    this.app.on('beforeStop', this.stopAutoSyncScheduler);
+
     await this.ensureSchedulesDesktopRoute();
+  }
+
+  private async syncRuntimeCollections() {
+    for (const collectionName of [SETTINGS_COLLECTION, TOKENS_COLLECTION]) {
+      const collection = this.db.getCollection(collectionName);
+      if (!collection) {
+        continue;
+      }
+
+      await collection.sync({
+        force: false,
+        alter: {
+          drop: false,
+        },
+      } as any);
+    }
   }
 
   private async ensureSchedulesDesktopRoute() {
@@ -321,6 +364,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   getSettings = async (ctx, next) => {
     this.requireAdmin(ctx);
     const settings = await this.readSettings();
+    const autoSync = this.getAutoSyncConfig(settings);
     const defaultRedirectUri = this.getDefaultRedirectUri(ctx);
     const redirectUri = settings.redirectUri || defaultRedirectUri;
 
@@ -330,6 +374,14 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       defaultRedirectUri,
       hasClientSecret: Boolean(settings.clientSecret),
       scopes: GOOGLE_SCOPES,
+      autoSyncEnabled: autoSync.enabled,
+      autoSyncIntervalMinutes: autoSync.intervalMinutes,
+      autoSyncRunning: this.autoSyncRunning,
+      autoSyncNextRunAt: settings.autoSyncNextRunAt || null,
+      autoSyncLastStartedAt: settings.autoSyncLastStartedAt || null,
+      autoSyncLastFinishedAt: settings.autoSyncLastFinishedAt || null,
+      autoSyncLastResult: settings.autoSyncLastResult || null,
+      autoSyncLastError: settings.autoSyncLastError || '',
     };
     await next();
   };
@@ -340,11 +392,14 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     const existing = await repo.findOne();
     const values = ctx.action?.params?.values || {};
     const current = this.recordToJSON(existing);
+    const autoSync = this.getAutoSyncConfig({ ...current, ...values });
 
-    const nextValues: Record<string, string> = {
+    const nextValues: Record<string, any> = {
       clientId: String(values.clientId || '').trim(),
       redirectUri: String(values.redirectUri || '').trim(),
       clientSecret: current?.clientSecret || '',
+      autoSyncEnabled: autoSync.enabled,
+      autoSyncIntervalMinutes: autoSync.intervalMinutes,
     };
 
     if (typeof values.clientSecret === 'string' && values.clientSecret.trim()) {
@@ -356,6 +411,8 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
     } else {
       await repo.create({ values: nextValues });
     }
+
+    await this.reloadAutoSyncScheduler();
 
     ctx.body = { ok: true, hasClientSecret: Boolean(nextValues.clientSecret) };
     await next();
@@ -692,21 +749,139 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       ctx.throw(403, '他ユーザーの予定は同期できません');
     }
     const range = this.getDateRange(values);
-    const tokenRecords = await this.getSyncTokenRecords(ctx, targetUserId);
+    const result = await this.runGoogleCalendarSync(ctx, {
+      targetUserId,
+      range,
+      failWhenNoToken: true,
+    });
+    ctx.body = result;
+    await next();
+  };
+
+  disconnect = async (ctx, next) => {
+    const userId = this.getCurrentUserId(ctx);
+    await ctx.db.getRepository(TOKENS_COLLECTION).destroy({ filter: { userId } });
+    ctx.body = { ok: true };
+    await next();
+  };
+
+  private startAutoSyncScheduler = async () => {
+    try {
+      await this.reloadAutoSyncScheduler();
+    } catch (error) {
+      this.logAutoSyncError('Auto sync scheduler failed to start', error);
+    }
+  };
+
+  private stopAutoSyncScheduler = () => {
+    this.clearAutoSyncTimer();
+  };
+
+  private async reloadAutoSyncScheduler() {
+    this.clearAutoSyncTimer();
+
+    const settings = await this.readSettings();
+    const autoSync = this.getAutoSyncConfig(settings);
+    if (!autoSync.enabled) {
+      await this.updateSettingsRuntime({ autoSyncNextRunAt: null }, { createIfMissing: false });
+      return;
+    }
+
+    await this.scheduleNextAutoSync(autoSync.intervalMinutes * MINUTE_MS);
+  }
+
+  private async scheduleNextAutoSync(delayMs: number) {
+    const nextRunAt = new Date(Date.now() + delayMs);
+    await this.updateSettingsRuntime({ autoSyncNextRunAt: nextRunAt });
+
+    this.autoSyncTimer = setTimeout(async () => {
+      try {
+        await this.runAutoSyncOnce();
+      } finally {
+        await this.reloadAutoSyncScheduler();
+      }
+    }, delayMs);
+
+    this.autoSyncTimer.unref?.();
+  }
+
+  private clearAutoSyncTimer() {
+    if (this.autoSyncTimer) {
+      clearTimeout(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
+  }
+
+  private async runAutoSyncOnce() {
+    if (this.autoSyncRunning) {
+      return;
+    }
+
+    this.autoSyncRunning = true;
+    const startedAt = new Date();
+
+    try {
+      const settings = await this.readSettings();
+      const autoSync = this.getAutoSyncConfig(settings);
+      if (!autoSync.enabled) {
+        return;
+      }
+
+      await this.updateSettingsRuntime({
+        autoSyncLastStartedAt: startedAt,
+        autoSyncLastError: '',
+      });
+
+      const result = await this.runGoogleCalendarSync(this.getSystemContext(), {
+        targetUserId: null,
+        range: (tokenRecord) => this.getAutoSyncRange(tokenRecord),
+        failWhenNoToken: false,
+      });
+
+      await this.updateSettingsRuntime({
+        autoSyncLastFinishedAt: new Date(),
+        autoSyncLastResult: result,
+        autoSyncLastError: '',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logAutoSyncError('Auto sync failed', error);
+      await this.updateSettingsRuntime({
+        autoSyncLastFinishedAt: new Date(),
+        autoSyncLastError: message,
+      });
+    } finally {
+      this.autoSyncRunning = false;
+    }
+  }
+
+  private async runGoogleCalendarSync(
+    ctx,
+    params: {
+      targetUserId?: number | string | null;
+      range: GoogleCalendarSyncRange | ((tokenRecord) => GoogleCalendarSyncRange);
+      failWhenNoToken?: boolean;
+    },
+  ): Promise<GoogleCalendarSyncResult> {
+    const tokenRecords = await this.getSyncTokenRecords(ctx, params.targetUserId || null);
     const settings = await this.requireSettings(ctx);
     const tokenRepo = ctx.db.getRepository(TOKENS_COLLECTION);
-    const result = {
+    const syncStartedAt = new Date();
+    const result: GoogleCalendarSyncResult = {
       users: tokenRecords.length,
       fetched: 0,
       created: 0,
       updated: 0,
       deleted: 0,
       skipped: 0,
-      errors: [] as { userId: string | number; message: string }[],
+      errors: [],
     };
 
     if (!tokenRecords.length) {
-      ctx.throw(400, 'Google連携済みユーザーが見つかりません');
+      if (params.failWhenNoToken) {
+        ctx.throw(400, 'Google連携済みユーザーが見つかりません');
+      }
+      return result;
     }
 
     for (const tokenRecord of tokenRecords) {
@@ -714,12 +889,8 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       try {
         const accessToken = await this.ensureAccessToken(ctx, tokenRecord, settings);
         const primaryCalendar = await this.ensurePrimaryCalendar(ctx, tokenRepo, tokenRecord, accessToken);
-        const events = await this.fetchGoogleCalendarEvents(
-          accessToken,
-          primaryCalendar.id,
-          range.startAt,
-          range.endAt,
-        );
+        const range = typeof params.range === 'function' ? params.range(tokenRecord) : params.range;
+        const events = await this.fetchGoogleCalendarEvents(accessToken, primaryCalendar.id, range);
         result.fetched += events.length;
 
         for (const event of events) {
@@ -731,6 +902,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
           filter: { id: this.getValue(tokenRecord, 'id') },
           values: {
             lastFetchedAt: new Date(),
+            lastSyncedAt: syncStartedAt,
             selectedCalendarId: primaryCalendar.id,
             isActive: true,
           },
@@ -743,16 +915,71 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       }
     }
 
-    ctx.body = result;
-    await next();
-  };
+    return result;
+  }
 
-  disconnect = async (ctx, next) => {
-    const userId = this.getCurrentUserId(ctx);
-    await ctx.db.getRepository(TOKENS_COLLECTION).destroy({ filter: { userId } });
-    ctx.body = { ok: true };
-    await next();
-  };
+  private getSystemContext() {
+    return {
+      db: this.db,
+      throw(status: number, message: string) {
+        const error = new Error(message || String(status));
+        (error as any).status = status;
+        throw error;
+      },
+    };
+  }
+
+  private async updateSettingsRuntime(values: Record<string, any>, options: { createIfMissing?: boolean } = {}) {
+    const repo = this.db.getRepository(SETTINGS_COLLECTION);
+    const existing = await repo.findOne();
+    if (existing) {
+      await repo.update({ filter: { id: this.getValue(existing, 'id') }, values });
+      return;
+    }
+
+    if (options.createIfMissing === false) {
+      return;
+    }
+
+    await repo.create({ values });
+  }
+
+  private getAutoSyncConfig(settings: any = {}) {
+    return {
+      enabled: Boolean(settings.autoSyncEnabled),
+      intervalMinutes: this.normalizeAutoSyncIntervalMinutes(settings.autoSyncIntervalMinutes),
+    };
+  }
+
+  private normalizeAutoSyncIntervalMinutes(value) {
+    const interval = this.normalizeInteger(value, DEFAULT_AUTO_SYNC_INTERVAL_MINUTES, 1, 60);
+    return AUTO_SYNC_INTERVAL_OPTIONS.includes(interval) ? interval : DEFAULT_AUTO_SYNC_INTERVAL_MINUTES;
+  }
+
+  private normalizeInteger(value, fallback: number, min: number, max: number) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return fallback;
+    }
+    return Math.min(Math.max(Math.trunc(numeric), min), max);
+  }
+
+  private getAutoSyncRange(tokenRecord): GoogleCalendarSyncRange {
+    const lastSyncedAt = new Date(this.getValue(tokenRecord, 'lastSyncedAt'));
+    if (this.isValidDate(lastSyncedAt)) {
+      return { updatedMin: lastSyncedAt };
+    }
+    return { startAt: this.getCurrentMonthStart() };
+  }
+
+  private getCurrentMonthStart() {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  }
+
+  private logAutoSyncError(message: string, error) {
+    this.app.logger?.warn?.(`[googleCalendarSync] ${message}: ${error instanceof Error ? error.message : error}`);
+  }
 
   private async readSettings() {
     const record = await this.db.getRepository(SETTINGS_COLLECTION).findOne();
@@ -1187,8 +1414,7 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
   private async fetchGoogleCalendarEvents(
     accessToken: string,
     calendarId: string,
-    startAt: Date,
-    endAt: Date,
+    range: GoogleCalendarSyncRange,
   ): Promise<GoogleCalendarListEvent[]> {
     const events: GoogleCalendarListEvent[] = [];
     let pageToken = '';
@@ -1198,8 +1424,15 @@ export class BizBlockGoogleCalendarSyncServer extends Plugin {
       url.searchParams.set('singleEvents', 'true');
       url.searchParams.set('showDeleted', 'true');
       url.searchParams.set('maxResults', '2500');
-      url.searchParams.set('timeMin', startAt.toISOString());
-      url.searchParams.set('timeMax', endAt.toISOString());
+      if (range.startAt) {
+        url.searchParams.set('timeMin', range.startAt.toISOString());
+      }
+      if (range.endAt) {
+        url.searchParams.set('timeMax', range.endAt.toISOString());
+      }
+      if (range.updatedMin) {
+        url.searchParams.set('updatedMin', range.updatedMin.toISOString());
+      }
       if (pageToken) {
         url.searchParams.set('pageToken', pageToken);
       }

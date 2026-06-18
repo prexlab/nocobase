@@ -68,5 +68,10 @@ export default defineCollection({
       type: 'datetime',
       interface: 'datetime',
     },
+    {
+      name: 'lastSyncedAt',
+      type: 'datetime',
+      interface: 'datetime',
+    },
   ],
 });

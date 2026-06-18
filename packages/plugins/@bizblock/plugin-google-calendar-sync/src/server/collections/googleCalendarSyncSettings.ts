@@ -29,5 +29,42 @@ export default defineCollection({
       type: 'string',
       interface: 'input',
     },
+    {
+      name: 'autoSyncEnabled',
+      type: 'boolean',
+      interface: 'boolean',
+      defaultValue: false,
+    },
+    {
+      name: 'autoSyncIntervalMinutes',
+      type: 'integer',
+      interface: 'integer',
+      defaultValue: 15,
+    },
+    {
+      name: 'autoSyncNextRunAt',
+      type: 'datetime',
+      interface: 'datetime',
+    },
+    {
+      name: 'autoSyncLastStartedAt',
+      type: 'datetime',
+      interface: 'datetime',
+    },
+    {
+      name: 'autoSyncLastFinishedAt',
+      type: 'datetime',
+      interface: 'datetime',
+    },
+    {
+      name: 'autoSyncLastResult',
+      type: 'json',
+      interface: 'json',
+    },
+    {
+      name: 'autoSyncLastError',
+      type: 'text',
+      interface: 'textarea',
+    },
   ],
 });
