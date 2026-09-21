@@ -3,7 +3,7 @@
   "name": "@bizblock/plugin-google-calendar-sync",
   "displayName": "BizBlock Google Calendar Sync",
   "description": "Google OAuth and Google Calendar schedule synchronization for BizBlock.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "main": "dist/server/index.js",
   "peerDependencies": {
     "@nocobase/client": "2.x",
