@@ -11,6 +11,8 @@ import { defineCollection } from '@nocobase/database';
 
 export default defineCollection({
   name: 'googleCalendarSyncSchedules',
+  title: '{{t("Google Calendar sync schedules", { ns: "@bizblock/plugin-google-calendar-sync" })}}',
+  uiManageable: true,
   tableName: 'googleCalendarSyncSchedules',
   timestamps: true,
   fields: [
